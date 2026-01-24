@@ -36,8 +36,19 @@ jobs:
           sudo install -m 600 firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
 
           echo "Restarting service..."
-          sudo systemctl restart harvestpilot-raspserver
+          if ! sudo systemctl restart harvestpilot-raspserver; then
+            echo "❌ restart command failed"
+            sudo systemctl status harvestpilot-raspserver --no-pager || true
+            sudo journalctl -u harvestpilot-raspserver -n 200 --no-pager || true
+            exit 3
+          fi
 
           sleep 2
-          sudo systemctl is-active --quiet harvestpilot-raspserver
-          echo "✅ Service running"
+          if sudo systemctl is-active --quiet harvestpilot-raspserver; then
+            echo "✅ Service running successfully"
+          else
+            echo "❌ Service not active after restart"
+            sudo systemctl status harvestpilot-raspserver --no-pager || true
+            sudo journalctl -u harvestpilot-raspserver -n 200 --no-pager || true
+            exit 3
+          fi

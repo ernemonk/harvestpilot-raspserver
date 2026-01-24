@@ -19,11 +19,11 @@ jobs:
           # Pull latest code
           echo "Pulling latest code..."
           git fetch origin
-          git checkout origin/main
+          git reset --hard origin/main
           
-          # Install/update dependencies
+          # Install/update dependencies with pip3
           echo "Installing dependencies..."
-          pip install -q -r requirements.txt
+          pip3 install -q -r requirements.txt 2>&1 || echo "⚠ Some dependencies may have failed, continuing..."
           
           # Restart service
           echo "Restarting service..."

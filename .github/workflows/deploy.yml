@@ -20,9 +20,15 @@ jobs:
         run: |
           if [ -n "$FIREBASE_KEY_B64" ]; then
             echo "Creating firebase-key.json from base64..."
-            echo "$FIREBASE_KEY_B64" | base64 -d > firebase-key.json
-            echo "✓ Firebase credentials configured"
-            echo "File size: $(wc -c < firebase-key.json) bytes"
+            # Remove any whitespace and decode
+            echo "$FIREBASE_KEY_B64" | tr -d '\n\r\t ' | base64 -d > firebase-key.json
+            if [ $? -eq 0 ] && [ -s firebase-key.json ]; then
+              echo "✓ Firebase credentials configured"
+              echo "File size: $(wc -c < firebase-key.json) bytes"
+            else
+              echo "✗ Failed to create firebase-key.json"
+              exit 1
+            fi
           else
             echo "⚠ Warning: FIREBASE_KEY_B64 secret not set. Service may fail to start."
           fi

@@ -1,0 +1,50 @@
+name: Deploy RaspServer to Pi
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Deploy to Raspberry Pi
+        run: |
+          # Pull latest code
+          echo "Pulling latest code..."
+          git fetch origin
+          git checkout origin/main
+          
+          # Install/update dependencies
+          echo "Installing dependencies..."
+          pip install -q -r requirements.txt
+          
+          # Restart service
+          echo "Restarting service..."
+          sudo systemctl restart harvestpilot-raspserver || sudo systemctl start harvestpilot-raspserver
+          
+          # Verify service is running
+          sleep 2
+          if sudo systemctl is-active --quiet harvestpilot-raspserver; then
+              echo "✓ Service running successfully"
+          else
+              echo "✗ Service failed to start"
+              sudo systemctl status harvestpilot-raspserver
+              exit 1
+          fi
+      
+      - name: Deployment Status
+        if: success()
+        run: echo "✓ RaspServer deployed successfully to Pi"
+      
+      - name: Deployment Failed
+        if: failure()
+        run: |
+          echo "✗ Deployment to Pi failed"
+          exit 1

@@ -21,9 +21,9 @@ jobs:
           git fetch origin
           git reset --hard origin/main
           
-          # Install/update dependencies with pip3
-          echo "Installing dependencies..."
-          pip3 install -q -r requirements.txt 2>&1 || echo "⚠ Some dependencies may have failed, continuing..."
+          # Note: pip3 is broken on system, dependencies already installed
+          # Skip pip install - use apt to install new system dependencies if needed
+          echo "✓ Code updated successfully"
           
           # Restart service
           echo "Restarting service..."

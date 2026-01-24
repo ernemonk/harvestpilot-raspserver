@@ -28,7 +28,30 @@ class FirebaseClient:
         try:
             # Initialize Firebase Admin SDK with service account
             if not firebase_admin._apps:
-                cred = credentials.Certificate(config.FIREBASE_CREDENTIALS_PATH)
+                cred_path = config.FIREBASE_CREDENTIALS_PATH
+                
+                # Debug: Log the path being used
+                logger.info(f"Loading Firebase credentials from: {cred_path}")
+                
+                # Check if file exists
+                import os
+                if not os.path.exists(cred_path):
+                    # Try absolute path if relative path fails
+                    if not os.path.isabs(cred_path):
+                        abs_path = os.path.expanduser(f"~/{cred_path}")
+                        if os.path.exists(abs_path):
+                            cred_path = abs_path
+                            logger.info(f"Using absolute path: {cred_path}")
+                        else:
+                            raise FileNotFoundError(f"Firebase credentials not found at {cred_path} or {abs_path}")
+                    else:
+                        raise FileNotFoundError(f"Firebase credentials not found at {cred_path}")
+                
+                # Verify file is readable
+                if not os.access(cred_path, os.R_OK):
+                    raise PermissionError(f"No read permission for Firebase credentials at {cred_path}")
+                
+                cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred, {
                     'databaseURL': config.FIREBASE_DATABASE_URL
                 })
@@ -46,7 +69,7 @@ class FirebaseClient:
             self._listen_for_commands()
             
         except Exception as e:
-            logger.error(f"Failed to connect to Firebase: {e}")
+            logger.error(f"Failed to connect to Firebase: {e}", exc_info=True)
             raise
     
     def disconnect(self):

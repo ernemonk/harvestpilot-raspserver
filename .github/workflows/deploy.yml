@@ -14,12 +14,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
+      - name: Setup Firebase Credentials
+        run: |
+          # Create firebase-key.json from GitHub Secret if it doesn't exist or is outdated
+          if [ -z "$FIREBASE_KEY" ]; then
+            echo "⚠ Warning: FIREBASE_KEY secret not set. Service may fail to start."
+          else
+            echo "Creating firebase-key.json..."
+            echo "$FIREBASE_KEY" > firebase-key.json
+            echo "✓ Firebase credentials configured"
+          fi
+        env:
+          FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
+      
       - name: Deploy to Raspberry Pi
         run: |
           # Pull latest code
           echo "Pulling latest code..."
           git fetch origin
           git reset --hard origin/main
+          
+          # Copy firebase-key.json if it was created
+          if [ -f "firebase-key.json" ]; then
+            cp firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
+            chmod 600 /home/monkphx/harvestpilot-raspserver/firebase-key.json
+            echo "✓ Firebase credentials deployed"
+          fi
           
           # Note: pip3 is broken on system, dependencies already installed
           # Skip pip install - use apt to install new system dependencies if needed

@@ -12,30 +12,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Write Firebase credentials (JSON)
+      - name: Write Firebase credentials (workspace)
         shell: bash
         env:
           FIREBASE_KEY_JSON: ${{ secrets.FIREBASE_KEY_JSON }}
         run: |
           set -euo pipefail
-          if [ -z "${FIREBASE_KEY_JSON:-}" ]; then
-            echo "❌ FIREBASE_KEY_JSON secret is empty or not set"
-            exit 1
-          fi
-
-          CREDS_FILE="/home/monkphx/harvestpilot-raspserver/firebase-key.json"
-          printf '%s' "$FIREBASE_KEY_JSON" > "$CREDS_FILE"
-
-          # Validate JSON
-          test -s "$CREDS_FILE" || { echo "❌ File is empty"; exit 1; }
-          python3 -c "import json; json.load(open('$CREDS_FILE','r',encoding='utf-8')); print('✅ firebase-key.json is valid JSON')"
-          
-          # Set proper permissions (readable by monkphx user)
-          sudo chown monkphx:monkphx "$CREDS_FILE"
-          sudo chmod 600 "$CREDS_FILE"
-          
-          # Verify permissions
-          ls -la "$CREDS_FILE"
+          test -n "${FIREBASE_KEY_JSON:-}"
+          printf '%s' "$FIREBASE_KEY_JSON" > firebase-key.json
+          test -s firebase-key.json
+          python3 -c "import json; json.load(open('firebase-key.json','r',encoding='utf-8')); print('✅ firebase-key.json valid')"
 
       - name: Deploy and restart service
         shell: bash
@@ -46,30 +32,12 @@ jobs:
           git fetch origin
           git reset --hard origin/main
 
-          echo "Verifying firebase-key.json exists and is readable..."
-          CREDS_FILE="/home/monkphx/harvestpilot-raspserver/firebase-key.json"
-          if [ ! -f "$CREDS_FILE" ]; then
-            echo "❌ Firebase credentials file not found at $CREDS_FILE"
-            exit 1
-          fi
-          
-          if [ ! -r "$CREDS_FILE" ]; then
-            echo "❌ Firebase credentials file exists but is not readable"
-            echo "Fixing permissions..."
-            sudo chown monkphx:monkphx "$CREDS_FILE"
-            sudo chmod 600 "$CREDS_FILE"
-          fi
-          
+          echo "Deploying firebase-key.json..."
+          sudo install -m 600 firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
+
           echo "Restarting service..."
           sudo systemctl restart harvestpilot-raspserver
 
           sleep 2
-          if sudo systemctl is-active --quiet harvestpilot-raspserver; then
-            echo "✅ Service running successfully"
-          else
-            echo "❌ Service failed to start"
-            sudo systemctl status harvestpilot-raspserver --no-pager || true
-            echo "---- last 120 lines of logs ----"
-            sudo journalctl -u harvestpilot-raspserver -n 120 --no-pager || true
-            exit 1
-          fi
+          sudo systemctl is-active --quiet harvestpilot-raspserver
+          echo "✅ Service running"

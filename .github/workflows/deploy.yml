@@ -33,7 +33,7 @@ jobs:
           git reset --hard origin/main
 
           echo "Deploying firebase-key.json..."
-          sudo install -m 600 firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
+          sudo install -m 600 -o monkphx -g monkphx firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
 
           echo "Restarting service..."
           if ! sudo systemctl restart harvestpilot-raspserver; then

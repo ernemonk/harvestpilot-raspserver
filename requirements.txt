@@ -1,4 +1,4 @@
 RPi.GPIO==0.7.1
 paho-mqtt==1.6.1
-Adafruit-DHT==1.0.0
+adafruit-circuitpython-dht==3.7.9
 python-dotenv==1.0.1

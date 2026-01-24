@@ -16,20 +16,16 @@ jobs:
       
       - name: Setup Firebase Credentials
         run: |
-          # Create firebase-key.json from GitHub Secret
           if [ -z "$FIREBASE_KEY" ]; then
             echo "⚠ Warning: FIREBASE_KEY secret not set. Service may fail to start."
           else
             echo "Creating firebase-key.json..."
-            # Write the secret safely to a file
-            cat > firebase-key.json << 'EOF'
-$FIREBASE_KEY
-EOF
+            cat > firebase-key.json << 'EOFKEY'
+${{ secrets.FIREBASE_KEY }}
+EOFKEY
             echo "✓ Firebase credentials configured"
             echo "File size: $(wc -c < firebase-key.json) bytes"
           fi
-        env:
-          FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
       
       - name: Deploy to Raspberry Pi
         run: |

@@ -2,71 +2,64 @@ name: Deploy RaspServer to Pi
 
 on:
   push:
-    branches:
-      - main
-      - develop
+    branches: [main, develop]
 
 jobs:
   deploy:
     runs-on: self-hosted
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Firebase Credentials
+        uses: actions/checkout@v4
+
+      - name: Write Firebase credentials (JSON)
+        shell: bash
+        env:
+          FIREBASE_KEY_JSON: ${{ secrets.FIREBASE_KEY_JSON }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${FIREBASE_KEY_JSON:-}" ]; then
+            echo "❌ FIREBASE_KEY_JSON secret is empty or not set"
+            exit 1
+          fi
+
+          # Write the secret exactly as-is (multiline safe)
+          cat > firebase-key.json <<EOF
+${FIREBASE_KEY_JSON}
+EOF
+
+          # Basic checks
+          test -s firebase-key.json
+          python3 - <<'PY'
+import json
+with open("firebase-key.json","r",encoding="utf-8") as f:
+    json.load(f)
+print("✅ firebase-key.json is valid JSON")
+PY
+
+      - name: Deploy and restart service
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${FIREBASE_KEY_JSON:-}" ]; then
-            echo "Creating firebase-key.json from secret..."
-            cat > firebase-key.json << 'EOF'
-${{ secrets.FIREBASE_KEY_JSON }}
-EOF
-            test -s firebase-key.json && echo "✓ Firebase credentials configured ($(wc -c < firebase-key.json) bytes)" || (echo "✗ Failed to create firebase-key.json"; exit 1)
-          else
-            echo "✗ FIREBASE_KEY_JSON secret is not set"
-            exit 1
-          fi
-      
-      - name: Deploy to Raspberry Pi
-        run: |
-          # Pull latest code
+
           echo "Pulling latest code..."
           git fetch origin
           git reset --hard origin/main
-          
-          # Copy firebase-key.json if it was created
-          if [ -f "firebase-key.json" ]; then
-            cp firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
-            chmod 600 /home/monkphx/harvestpilot-raspserver/firebase-key.json
-            echo "✓ Firebase credentials deployed"
-          fi
-          
-          # Note: pip3 is broken on system, dependencies already installed
-          # Skip pip install - use apt to install new system dependencies if needed
-          echo "✓ Code updated successfully"
-          
-          # Restart service
+
+          echo "Deploying firebase-key.json..."
+          sudo install -m 600 firebase-key.json /home/monkphx/harvestpilot-raspserver/firebase-key.json
+
           echo "Restarting service..."
-          sudo systemctl restart harvestpilot-raspserver || sudo systemctl start harvestpilot-raspserver
-          
-          # Verify service is running
+          sudo systemctl restart harvestpilot-raspserver
+
           sleep 2
           if sudo systemctl is-active --quiet harvestpilot-raspserver; then
-              echo "✓ Service running successfully"
+            echo "✅ Service running successfully"
           else
-              echo "✗ Service failed to start"
-              sudo systemctl status harvestpilot-raspserver
-              exit 1
+            echo "❌ Service failed to start"
+            sudo systemctl status harvestpilot-raspserver --no-pager || true
+            echo "---- last 120 lines of logs ----"
+            sudo journalctl -u harvestpilot-raspserver -n 120 --no-pager || true
+            exit 1
           fi
-      
-      - name: Deployment Status
-        if: success()
-        run: echo "✓ RaspServer deployed successfully to Pi"
-      
-      - name: Deployment Failed
-        if: failure()
-        run: |
-          echo "✗ Deployment to Pi failed"
-          exit 1

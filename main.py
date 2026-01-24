@@ -2,15 +2,14 @@
 HarvestPilot RaspServer - Raspberry Pi Hardware Control Server
 
 Runs on Raspberry Pi to control physical hardware and communicate with
-the cloud agent via MQTT.
+the cloud agent via Firebase Realtime Database.
 """
 
 import asyncio
 import logging
 import signal
 import sys
-from mqtt.client import MQTTClient
-from mqtt.handlers import CommandHandler
+from firebase_client import FirebaseClient
 from controllers.sensors import SensorController
 from controllers.irrigation import IrrigationController
 from controllers.lighting import LightingController
@@ -36,20 +35,16 @@ class RaspServer:
         self.lighting = LightingController()
         self.harvest = HarvestController()
         
-        # Initialize MQTT client
-        self.mqtt_client = MQTTClient()
-        self.command_handler = CommandHandler(
-            irrigation=self.irrigation,
-            lighting=self.lighting,
-            harvest=self.harvest,
-            sensors=self.sensors
-        )
+        # Initialize Firebase client
+        self.firebase = FirebaseClient()
         
-        # Register MQTT callbacks
-        self.mqtt_client.register_callback(
-            "harvestpilot/commands/#",
-            self.command_handler.handle_command
-        )
+        # Register command handlers
+        self.firebase.register_command_handler("irrigation", "start", self._handle_irrigation_start)
+        self.firebase.register_command_handler("irrigation", "stop", self._handle_irrigation_stop)
+        self.firebase.register_command_handler("lighting", "on", self._handle_lighting_on)
+        self.firebase.register_command_handler("lighting", "off", self._handle_lighting_off)
+        self.firebase.register_command_handler("harvest", "start", self._handle_harvest_start)
+        self.firebase.register_command_handler("harvest", "stop", self._handle_harvest_stop)
         
         self.running = False
         
@@ -60,8 +55,8 @@ class RaspServer:
         try:
             logger.info("Starting HarvestPilot RaspServer...")
             
-            # Connect to MQTT broker
-            await self.mqtt_client.connect()
+            # Connect to Firebase
+            self.firebase.connect()
             
             # Start sensor reading loop
             self.running = True
@@ -93,8 +88,8 @@ class RaspServer:
         for tray_id in range(1, 7):
             await self.harvest.stop_belt(tray_id)
         
-        # Disconnect MQTT
-        await self.mqtt_client.disconnect()
+        # Disconnect Firebase
+        self.firebase.disconnect()
         
         # Cleanup GPIO
         cleanup_gpio()
@@ -102,7 +97,7 @@ class RaspServer:
         logger.info("RaspServer stopped")
     
     async def sensor_reading_loop(self):
-        """Continuously read sensors and publish to MQTT"""
+        """Continuously read sensors and publish to Firebase"""
         logger.info("Starting sensor reading loop...")
         
         while self.running:
@@ -110,20 +105,16 @@ class RaspServer:
                 # Read all sensors
                 reading = await self.sensors.read_all()
                 
-                # Publish to MQTT
-                self.mqtt_client.publish(
-                    "harvestpilot/sensors/reading",
-                    reading
-                )
+                # Publish to Firebase
+                self.firebase.publish_sensor_data(reading)
                 
                 # Check thresholds and send alerts
                 alerts = await self.sensors.check_thresholds(reading)
                 if alerts:
                     for alert in alerts:
-                        self.mqtt_client.publish(
-                            "harvestpilot/alerts/threshold",
-                            alert
-                        )
+                        self.firebase.publish_status_update({
+                            "lastAlert": alert
+                        })
                         
                         # Emergency stop if critical
                         if alert.get('severity') == 'critical' and config.EMERGENCY_STOP_ON_WATER_LOW:
@@ -186,10 +177,105 @@ class RaspServer:
             await self.harvest.stop_belt(tray_id)
         
         # Publish emergency status
-        self.mqtt_client.publish(
-            "harvestpilot/alerts/emergency",
-            {"status": "emergency_stop", "reason": "critical_threshold"}
-        )
+        self.firebase.publish_status_update({
+            "emergencyStop": True,
+            "timestamp": asyncio.get_event_loop().time()
+        })
+    
+    # Command handlers for Firebase
+    def _handle_irrigation_start(self, params):
+        """Handle irrigation start command"""
+        try:
+            duration = params.get("duration", config.IRRIGATION_CYCLE_DURATION)
+            speed = params.get("speed", config.PUMP_DEFAULT_SPEED)
+            
+            asyncio.create_task(
+                self.irrigation.start(duration=duration, speed=speed)
+            )
+            
+            self.firebase.publish_status_update({
+                "irrigation": {"status": "running", "speed": speed}
+            })
+            
+            logger.info(f"Irrigation started - duration: {duration}s, speed: {speed}%")
+        except Exception as e:
+            logger.error(f"Error starting irrigation: {e}")
+    
+    def _handle_irrigation_stop(self, params):
+        """Handle irrigation stop command"""
+        try:
+            asyncio.create_task(self.irrigation.stop())
+            
+            self.firebase.publish_status_update({
+                "irrigation": {"status": "stopped"}
+            })
+            
+            logger.info("Irrigation stopped")
+        except Exception as e:
+            logger.error(f"Error stopping irrigation: {e}")
+    
+    def _handle_lighting_on(self, params):
+        """Handle lighting ON command"""
+        try:
+            intensity = params.get("intensity", config.LED_DEFAULT_INTENSITY)
+            
+            asyncio.create_task(
+                self.lighting.turn_on(intensity=intensity)
+            )
+            
+            self.firebase.publish_status_update({
+                "lighting": {"status": "on", "intensity": intensity}
+            })
+            
+            logger.info(f"Lighting turned ON - intensity: {intensity}%")
+        except Exception as e:
+            logger.error(f"Error turning on lighting: {e}")
+    
+    def _handle_lighting_off(self, params):
+        """Handle lighting OFF command"""
+        try:
+            asyncio.create_task(self.lighting.turn_off())
+            
+            self.firebase.publish_status_update({
+                "lighting": {"status": "off"}
+            })
+            
+            logger.info("Lighting turned OFF")
+        except Exception as e:
+            logger.error(f"Error turning off lighting: {e}")
+    
+    def _handle_harvest_start(self, params):
+        """Handle harvest start command"""
+        try:
+            tray_id = params.get("tray_id", 1)
+            speed = params.get("speed", config.HARVEST_BELT_SPEED)
+            
+            asyncio.create_task(
+                self.harvest.start_belt(tray_id=tray_id, speed=speed)
+            )
+            
+            self.firebase.publish_status_update({
+                f"harvest_tray_{tray_id}": {"status": "harvesting", "speed": speed}
+            })
+            
+            logger.info(f"Harvest started - tray: {tray_id}, speed: {speed}%")
+        except Exception as e:
+            logger.error(f"Error starting harvest: {e}")
+    
+    def _handle_harvest_stop(self, params):
+        """Handle harvest stop command"""
+        try:
+            tray_id = params.get("tray_id", 1)
+            
+            asyncio.create_task(self.harvest.stop_belt(tray_id=tray_id))
+            
+            self.firebase.publish_status_update({
+                f"harvest_tray_{tray_id}": {"status": "stopped"}
+            })
+            
+            logger.info(f"Harvest stopped - tray: {tray_id}")
+        except Exception as e:
+            logger.error(f"Error stopping harvest: {e}")
 
 
 async def main():

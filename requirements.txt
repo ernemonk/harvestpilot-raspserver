@@ -1,4 +1,4 @@
 RPi.GPIO==0.7.1
-paho-mqtt==1.6.1
+firebase-admin==6.1.0
 adafruit-circuitpython-dht
 python-dotenv==1.0.1

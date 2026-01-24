@@ -6,13 +6,11 @@ import os
 HARDWARE_PLATFORM = os.getenv("HARDWARE_PLATFORM", "raspberry_pi")
 SIMULATE_HARDWARE = os.getenv("SIMULATE_HARDWARE", "false").lower() == "true"
 
-# MQTT Broker (where the agent is running)
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
-MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "raspserver-001")
-MQTT_KEEPALIVE = 60
+# Firebase Configuration
+DEVICE_ID = os.getenv("DEVICE_ID", "raspserver-001")
+FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", "firebase-key.json")
+FIREBASE_DATABASE_URL = os.getenv("FIREBASE_DATABASE_URL", "https://harvest-hub.firebaseio.com")
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "harvest-hub")
 
 # GPIO Pin Configuration
 SENSOR_DHT22_PIN = 4

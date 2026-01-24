@@ -18,23 +18,15 @@ jobs:
           FIREBASE_KEY_JSON: ${{ secrets.FIREBASE_KEY_JSON }}
         run: |
           set -euo pipefail
-
           if [ -z "${FIREBASE_KEY_JSON:-}" ]; then
             echo "❌ FIREBASE_KEY_JSON secret is empty or not set"
             exit 1
           fi
 
-          # Write the secret safely using printf (avoids heredoc YAML issues)
           printf '%s' "$FIREBASE_KEY_JSON" > firebase-key.json
 
-          # Basic checks
           test -s firebase-key.json
-          python3 - <<'PY'
-import json
-with open("firebase-key.json","r",encoding="utf-8") as f:
-    json.load(f)
-print("✅ firebase-key.json is valid JSON")
-PY
+          python3 -c "import json; json.load(open('firebase-key.json','r',encoding='utf-8')); print('✅ firebase-key.json is valid JSON')"
 
       - name: Deploy and restart service
         shell: bash

@@ -23,6 +23,37 @@ jobs:
           test -s firebase-key.json
           python3 -c "import json; json.load(open('firebase-key.json','r',encoding='utf-8')); print('✅ firebase-key.json valid')"
 
+      - name: Setup GPIO configuration
+        shell: bash
+        env:
+          PI_MODEL: ${{ secrets.PI_MODEL || 'pi4' }}
+          MODULE_ID: ${{ secrets.MODULE_ID || '' }}
+          PUMP_GPIO: ${{ secrets.PUMP_GPIO || '17' }}
+          LIGHT_GPIO: ${{ secrets.LIGHT_GPIO || '18' }}
+          DHT_GPIO: ${{ secrets.DHT_GPIO || '4' }}
+          WATER_GPIO: ${{ secrets.WATER_GPIO || '27' }}
+        run: |
+          set -euo pipefail
+          echo "🔧 Setting up GPIO configuration..."
+          bash scripts/setup-gpio-automated.sh
+
+      - name: Initialize Pi and register to Firestore
+        shell: bash
+        env:
+          FIREBASE_CREDENTIALS_PATH: /home/monkphx/harvestpilot-raspserver/firebase-key.json
+        run: |
+          set -euo pipefail
+          echo "📝 Initializing Pi and registering to Firestore..."
+          
+          # Make sure init script is executable
+          chmod +x scripts/server_init.py
+          
+          # Run initialization (this will also be called by systemd on service start)
+          python3 scripts/server_init.py || {
+            echo "⚠️  Init script failed, but service will attempt to start"
+            # Don't exit here - allow service to start even if registration fails
+          }
+
       - name: Deploy and restart service
         shell: bash
         run: |

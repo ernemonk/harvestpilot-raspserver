@@ -51,9 +51,6 @@ nano config.py
 
 # View current config
 cat config.py | grep -E "^[A-Z_]+ ="
-
-# Test MQTT connection
-mosquitto_pub -h YOUR_AGENT_IP -t "test" -m "hello"
 ```
 
 ## Hardware Testing
@@ -64,9 +61,6 @@ python3 -c "import RPi.GPIO; print('✅ GPIO OK')"
 
 # Test DHT22 sensor
 python3 -c "import adafruit_dht; print('✅ DHT22 OK')"
-
-# Test MQTT
-python3 -c "import paho.mqtt.client; print('✅ MQTT OK')"
 
 # Read sensors manually
 python3 << EOF

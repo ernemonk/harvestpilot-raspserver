@@ -12,11 +12,7 @@ Then reboot and configure:
 sudo reboot
 ```
 
-After reboot:
-```bash
-nano ~/harvestpilot/harvestpilot-raspserver/config.py
-# Edit line 8: MQTT_BROKER = "YOUR_AGENT_SERVER_IP"
-```
+After reboot, the server will start automatically.
 
 ---
 
@@ -51,20 +47,14 @@ cd harvestpilot/harvestpilot-raspserver
 pip3 install -r requirements.txt
 ```
 
-### 5. Configure
-```bash
-nano config.py
-# Edit: MQTT_BROKER = "YOUR_AGENT_SERVER_IP"
-```
-
-### 6. Test
+### 5. Test
 ```bash
 python3 main.py
-# Should show: "Connected to MQTT broker successfully"
+# Should show Firebase connection successful
 # Ctrl+C to stop
 ```
 
-### 7. Set Up as Service
+### 6. Set Up as Service
 ```bash
 sudo nano /etc/systemd/system/harvestpilot-raspserver.service
 ```
@@ -106,14 +96,6 @@ sudo systemctl status harvestpilot-raspserver
 # View live logs
 tail -f ~/harvestpilot/harvestpilot-raspserver/logs/raspserver.log
 
-# Check MQTT connection
-mosquitto_sub -h localhost -t "harvestpilot/#" -v
-```
-
-Expected output:
-```
-harvestpilot/sensors/reading {"temperature": 72.5, "humidity": 65, ...}
-harvestpilot/status/irrigation {"running": false}
 ```
 
 ---
@@ -165,7 +147,6 @@ Git push → GitHub Actions → SSH to Pi → git pull → pip install → syste
 |-------|----------|
 | `ImportError: RPi.GPIO` | `pip3 install RPi.GPIO` |
 | `Permission denied GPIO` | `sudo usermod -a -G gpio pi && sudo reboot` |
-| `MQTT connection refused` | Check `MQTT_BROKER` IP in config.py |
 | `Service won't start` | `sudo systemctl status harvestpilot-raspserver` |
 
 ---
@@ -174,8 +155,7 @@ Git push → GitHub Actions → SSH to Pi → git pull → pip install → syste
 
 1. ✅ RaspServer running on Pi
 2. ⏭️  Deploy Agent to cloud
-3. ⏭️  Connect via MQTT
-4. ⏭️  Access via REST API
-5. ⏭️  Use web dashboard
+3. ⏭️  Access via REST API
+4. ⏭️  Use web dashboard
 
 See: [DEPLOYMENT_ARCHITECTURE.md](../harvestpilot-agent/docs/DEPLOYMENT_ARCHITECTURE.md)

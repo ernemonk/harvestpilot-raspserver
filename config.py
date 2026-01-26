@@ -22,10 +22,10 @@ SENSOR_SOIL_MOISTURE_PIN = 17  # Via external ADC
 SENSOR_WATER_LEVEL_PIN = 27
 SENSOR_FLOW_METER_PIN = 22
 
-PUMP_PWM_PIN = 26
+PUMP_PWM_PIN = 17  # GPIO 17 (Physical Pin 11) - Pump MOSFET
 PUMP_RELAY_PIN = 19
 
-LED_PWM_PIN = 12
+LED_PWM_PIN = 18  # GPIO 18 (Physical Pin 12) - LED strip MOSFET (PWM brightness)
 LED_RELAY_PIN = 13
 
 # Harvest belt motors (6 trays)

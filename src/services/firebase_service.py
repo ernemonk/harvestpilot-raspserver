@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, db, firestore
+from google.cloud.firestore import SERVER_TIMESTAMP
 import config
 from ..models import SensorReading, Command, DeviceStatus
 
@@ -80,11 +81,10 @@ class FirebaseService:
     def _update_device_status(self, status):
         """Update device status in Firestore"""
         try:
-            now = datetime.now()
             update_data = {
                 "status": status,
-                "lastHeartbeat": now.isoformat(),
-                "lastSyncAt": now.isoformat(),
+                "lastHeartbeat": SERVER_TIMESTAMP,
+                "lastSyncAt": SERVER_TIMESTAMP,
             }
             # Use Firestore exclusively
             self.firestore_db.collection("devices").document(
@@ -106,7 +106,7 @@ class FirebaseService:
                 self.device_id
             ).collection("sensor_readings").add({
                 **sensor_reading.to_dict(),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": SERVER_TIMESTAMP
             })
             
             logger.debug(f"Published sensor data")
@@ -125,7 +125,7 @@ class FirebaseService:
                 self.device_id
             ).set({
                 "status_data": status_data,
-                "lastUpdated": datetime.now().isoformat()
+                "lastUpdated": SERVER_TIMESTAMP
             }, merge=True)
             
             logger.debug(f"Published status update")
@@ -164,7 +164,7 @@ class FirebaseService:
                 self.device_id
             ).collection("commands").document(cmd_id).set({
                 "processed": True,
-                "processedAt": datetime.now().isoformat()
+                "processedAt": SERVER_TIMESTAMP
             }, merge=True)
         except Exception as e:
             logger.error(f"Failed to mark command processed: {e}")
@@ -175,13 +175,12 @@ class FirebaseService:
             if not self.connected:
                 return
             
-            now = datetime.now()
             self.firestore_db.collection("devices").document(
                 self.device_id
             ).set({
                 "status": "online",
-                "lastHeartbeat": int(now.timestamp() * 1000),
-                "lastSyncAt": now.isoformat(),
+                "lastHeartbeat": SERVER_TIMESTAMP,
+                "lastSyncAt": SERVER_TIMESTAMP,
             }, merge=True)
             logger.debug(f"Heartbeat published")
         except Exception as e:

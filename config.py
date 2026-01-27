@@ -8,7 +8,6 @@ SIMULATE_HARDWARE = os.getenv("SIMULATE_HARDWARE", "false").lower() == "true"
 
 # Firebase Configuration
 DEVICE_ID = os.getenv("DEVICE_ID", "raspserver-001")
-ORGANIZATION_ID = os.getenv("ORGANIZATION_ID", "default-org")
 
 # Default to absolute path on Pi, but allow environment override
 _default_creds = "/home/monkphx/harvestpilot-raspserver/firebase-key.json"

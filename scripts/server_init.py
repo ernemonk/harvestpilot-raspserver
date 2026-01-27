@@ -35,7 +35,6 @@ class PiInitializer:
         self.pi_mac = None
         self.pi_hostname = None
         self.config_device_id = None
-        self.organization_id = None
         self.firestore = None
         
     def get_pi_serial(self) -> str:
@@ -92,18 +91,16 @@ class PiInitializer:
             return "unknown"
     
     def get_config_device_id(self) -> str:
-        """Get device ID and organization ID from config"""
+        """Get device ID from config"""
         try:
             # Add raspserver directory to path if needed
             sys.path.insert(0, str(Path(__file__).parent.parent))
             import config
             device_id = getattr(config, 'DEVICE_ID', 'raspserver-001')
-            self.organization_id = getattr(config, 'ORGANIZATION_ID', 'default-org')
-            logger.info(f"✅ Got config DEVICE_ID: {device_id}, ORG_ID: {self.organization_id}")
+            logger.info(f"✅ Got config DEVICE_ID: {device_id}")
             return device_id
         except Exception as e:
-            logger.warning(f"⚠️  Could not load config: {e}, using defaults")
-            self.organization_id = 'default-org'
+            logger.warning(f"⚠️  Could not load config: {e}, using default")
             return os.getenv('DEVICE_ID', 'raspserver-001')
     
     def initialize_firebase(self):
@@ -152,9 +149,6 @@ class PiInitializer:
                 "hostname": self.pi_hostname,
                 "ip_address": self.get_ip_address(),
                 
-                # Organization
-                "organizationId": self.organization_id,
-                
                 # Status
                 "status": "online",
                 "lastHeartbeat": datetime.now().isoformat(),
@@ -178,7 +172,7 @@ class PiInitializer:
             # Path: devices/{config_device_id}
             self.firestore.collection('devices').document(self.config_device_id).set(device_data)
             
-            logger.info(f"✅ Registered in Firestore: devices/{self.config_device_id} (org: {self.organization_id})")
+            logger.info(f"✅ Registered in Firestore: devices/{self.config_device_id}")
             return True
             
         except Exception as e:

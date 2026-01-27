@@ -90,18 +90,24 @@ class FirebaseService:
                 "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
                 "lastSyncAt": now.isoformat(),
             }
-            # First ensure parent path exists by setting root
-            try:
-                db.reference("devices").get()
-            except:
-                # Create devices root if it doesn't exist
-                db.reference("devices").set({})
-            
-            # Now set the device record
+            # Try to set the device record - Firebase will create paths as needed
             db.reference(path).set(update_data)
             logger.info(f"Device status updated to: {status}")
         except Exception as e:
-            logger.error(f"Failed to update device status: {e}")
+            logger.debug(f"Failed to update device status in Realtime DB: {e}")
+            # Fallback to Firestore
+            try:
+                self.firestore_db.collection("devices").document(
+                    self.device_id
+                ).set({
+                    "status": status,
+                    "lastSeen": now.isoformat(),
+                    "lastHeartbeat": int(now.timestamp() * 1000),
+                    "lastSyncAt": now.isoformat(),
+                }, merge=True)
+                logger.info(f"Device status updated to: {status} (via Firestore)")
+            except Exception as fs_e:
+                logger.error(f"Failed to update device status: {fs_e}")
     
     def publish_sensor_data(self, sensor_reading: SensorReading):
         """Publish sensor reading to Firebase"""

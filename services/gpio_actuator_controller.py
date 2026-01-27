@@ -69,46 +69,84 @@ class GPIOActuatorController:
             return False
     
     def _start_gpio_listener(self):
-        """Start listening to gpioState changes in Firestore"""
+        """Start listening to GPIO commands in Firestore"""
         try:
-            device_ref = self.firestore_db.collection('devices').document(self.device_id)
+            # Listen to commands subcollection: devices/{DEVICE_ID}/commands/
+            commands_ref = self.firestore_db.collection('devices').document(self.device_id).collection('commands')
             
             def on_snapshot(doc_snapshot, changes, read_time):
-                """Callback when device document changes"""
-                for doc in doc_snapshot:
-                    if doc.exists:
-                        data = doc.to_dict()
-                        gpio_state = data.get('gpioState', {})
+                """Callback when new commands arrive"""
+                for change in changes:
+                    if change.type.name == 'ADDED':
+                        command_data = change.document.to_dict()
+                        command_id = change.document.id
                         
-                        if gpio_state:
-                            self._process_gpio_state(gpio_state)
+                        if command_data:
+                            logger.info(f"GPIO command received: {command_id} - {command_data.get('type')}")
+                            self._process_gpio_command(command_id, command_data)
             
             # Attach the listener
-            self.listener = device_ref.on_snapshot(on_snapshot)
-            logger.info("GPIO state listener started")
+            self.listener = commands_ref.on_snapshot(on_snapshot)
+            logger.info("GPIO command listener started on devices/{}/commands/".format(self.device_id))
             
         except Exception as e:
             logger.error(f"Failed to start GPIO listener: {e}")
     
-    def _process_gpio_state(self, gpio_state: Dict[str, Any]):
-        """Process GPIO state updates from Firestore"""
-        for bcm_pin_str, pin_data in gpio_state.items():
-            try:
-                bcm_pin = int(bcm_pin_str)
-                mode = pin_data.get('mode', 'output')
-                state = pin_data.get('state', False)
-                function = pin_data.get('function', '')
+    def _process_gpio_command(self, command_id: str, command_data: Dict[str, Any]):
+        """Process GPIO commands from Firestore
+        
+        Command format:
+        {
+            "type": "pin_control",
+            "pin": 17,
+            "action": "on|off",
+            "duration": 5  # optional
+        }
+        """
+        try:
+            command_type = command_data.get('type')
+            
+            if command_type == 'pin_control':
+                pin = command_data.get('pin')
+                action = command_data.get('action', '').lower()
+                duration = command_data.get('duration')
                 
-                # Initialize pin if not already done
-                if bcm_pin not in self._pins_initialized:
-                    self._setup_pin(bcm_pin, mode)
+                if not pin or action not in ['on', 'off']:
+                    logger.error(f"Invalid pin_control command: {command_data}")
+                    return
                 
-                # Set pin state if it's an output
-                if mode == 'output':
-                    self._set_pin_state(bcm_pin, state, function)
+                # Set pin state
+                state = action == 'on'
+                self._setup_pin(pin, 'output')
+                self._set_pin_state(pin, state, f"Command {command_id}")
                 
-            except Exception as e:
-                logger.error(f"Error processing GPIO pin {bcm_pin_str}: {e}")
+                # Optional: auto-off after duration
+                if duration and state:
+                    import threading
+                    def auto_off():
+                        import time
+                        time.sleep(duration)
+                        self._set_pin_state(pin, False, f"Auto-off after {duration}s")
+                        logger.info(f"GPIO{pin} auto-turned off after {duration} seconds")
+                    
+                    thread = threading.Thread(target=auto_off, daemon=True)
+                    thread.start()
+                
+                logger.info(f"GPIO command processed: pin={pin}, action={action}, duration={duration}")
+                
+            elif command_type == 'pwm_control':
+                pin = command_data.get('pin')
+                duty_cycle = command_data.get('duty_cycle', 100)
+                frequency = command_data.get('frequency', 1000)
+                
+                logger.info(f"PWM command: pin={pin}, duty_cycle={duty_cycle}%, freq={frequency}Hz")
+                # PWM control logic here
+                
+            else:
+                logger.warning(f"Unknown command type: {command_type}")
+                
+        except Exception as e:
+            logger.error(f"Error processing GPIO command {command_id}: {e}")
     
     def _setup_pin(self, bcm_pin: int, mode: str):
         """Setup a GPIO pin"""

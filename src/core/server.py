@@ -41,7 +41,7 @@ class RaspServer:
         self.sensors = SensorService()
         self.automation = AutomationService(self.irrigation, self.lighting)
         
-        # Initialize GPIO Actuator Controller for real-time webapp control
+        # Initialize GPIO Actuator Controller for real-time Firestore control
         self.gpio_actuator = GPIOActuatorController(device_id=config.DEVICE_ID)
         
         # In-memory sensor reading buffer (economical persistence strategy)
@@ -78,7 +78,7 @@ class RaspServer:
             
             # Connect GPIO Actuator Controller (real-time Firestore listener)
             self.gpio_actuator.connect()
-            logger.info("GPIO Actuator Controller connected - listening for webapp toggles")
+            logger.info("GPIO Actuator Controller connected - listening to Firestore for GPIO commands")
             
             # Set Firebase status in diagnostics
             self.diagnostics.set_firebase_status(True)

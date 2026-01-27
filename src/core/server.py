@@ -11,6 +11,11 @@ from ..services.diagnostics import DiagnosticsService
 from ..utils.gpio_manager import cleanup_gpio
 import config
 
+# Import GPIO Actuator Controller for real-time Firestore control
+import sys
+sys.path.insert(0, str(config.BASE_DIR))
+from services.gpio_actuator_controller import GPIOActuatorController
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +40,9 @@ class RaspServer:
         self.firebase = FirebaseService()
         self.sensors = SensorService()
         self.automation = AutomationService(self.irrigation, self.lighting)
+        
+        # Initialize GPIO Actuator Controller for real-time webapp control
+        self.gpio_actuator = GPIOActuatorController(device_id=config.DEVICE_ID)
         
         # In-memory sensor reading buffer (economical persistence strategy)
         self.sensor_buffer = {
@@ -67,6 +75,10 @@ class RaspServer:
             
             # Connect to Firebase
             self.firebase.connect()
+            
+            # Connect GPIO Actuator Controller (real-time Firestore listener)
+            self.gpio_actuator.connect()
+            logger.info("GPIO Actuator Controller connected - listening for webapp toggles")
             
             # Set Firebase status in diagnostics
             self.diagnostics.set_firebase_status(True)
@@ -110,6 +122,9 @@ class RaspServer:
             
             # Disconnect Firebase
             self.firebase.disconnect()
+            
+            # Disconnect GPIO Actuator Controller
+            self.gpio_actuator.disconnect()
             
             # Close database
             self.database.close()

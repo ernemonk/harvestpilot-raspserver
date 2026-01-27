@@ -1,6 +1,10 @@
 """Configuration for HarvestPilot RaspServer"""
 
 import os
+from pathlib import Path
+
+# Base directory
+BASE_DIR = Path(__file__).parent.resolve()
 
 # Hardware Platform
 HARDWARE_PLATFORM = os.getenv("HARDWARE_PLATFORM", "raspberry_pi")

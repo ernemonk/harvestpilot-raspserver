@@ -84,12 +84,14 @@ class FirebaseService:
         try:
             path = f"devices/{self.device_id}"
             now = datetime.now()
-            db.reference(path).update({
+            update_data = {
                 "status": status,
                 "lastSeen": now.isoformat(),
                 "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
                 "lastSyncAt": now.isoformat(),
-            })
+            }
+            # Use set() to create or overwrite
+            db.reference(path).set(update_data)
             logger.info(f"Device status updated to: {status}")
         except Exception as e:
             logger.error(f"Failed to update device status: {e}")

@@ -7,6 +7,7 @@ from ..controllers.irrigation import IrrigationController
 from ..controllers.lighting import LightingController
 from ..controllers.harvest import HarvestController
 from ..services import FirebaseService, SensorService, AutomationService, DatabaseService
+from ..services.diagnostics import DiagnosticsService
 from ..utils.gpio_manager import cleanup_gpio
 import config
 
@@ -18,6 +19,9 @@ class RaspServer:
     
     def __init__(self):
         logger.info("Initializing HarvestPilot RaspServer...")
+        
+        # Initialize diagnostics (tracks metrics)
+        self.diagnostics = DiagnosticsService()
         
         # Initialize database (local storage)
         self.database = DatabaseService()
@@ -64,6 +68,9 @@ class RaspServer:
             # Connect to Firebase
             self.firebase.connect()
             
+            # Set Firebase status in diagnostics
+            self.diagnostics.set_firebase_status(True)
+            
             # Start all background tasks
             self.running = True
             
@@ -72,6 +79,7 @@ class RaspServer:
                 self._aggregation_loop(),        # New: aggregate buffered data every 60s
                 self._sync_to_cloud_loop(),     # Sync aggregated data every 30+ min
                 self._heartbeat_loop(),         # Keep-alive signal to Firebase every 30s
+                self._metrics_loop(),           # Publish metrics every 5 minutes
             ]
             
             if config.AUTO_IRRIGATION_ENABLED or config.AUTO_LIGHTING_ENABLED:
@@ -121,6 +129,7 @@ class RaspServer:
             try:
                 # Read sensors
                 reading = await self.sensors.read_all()
+                self.diagnostics.record_sensor_read()
                 
                 # Buffer reading in-memory (NOT writing to disk every 5 seconds)
                 self.sensor_buffer['temperature'].append(reading.temperature)
@@ -135,6 +144,8 @@ class RaspServer:
                 alerts = await self.sensors.check_thresholds(reading)
                 if alerts:
                     for alert in alerts:
+                        self.diagnostics.record_alert()
+                        
                         # Save raw reading when threshold crossed (immediate, no buffer)
                         await self.database.async_save_sensor_raw(reading, reason="threshold_crossed")
                         
@@ -153,6 +164,7 @@ class RaspServer:
                 
             except Exception as e:
                 logger.error(f"Error in sensor loop: {e}")
+                self.diagnostics.record_error('sensor')
                 await asyncio.sleep(5)
     
     async def _publish_sensor_async(self, reading):
@@ -161,6 +173,7 @@ class RaspServer:
             self.firebase.publish_sensor_data(reading)
         except Exception as e:
             logger.error(f"Failed to publish sensor data: {e}")
+            self.diagnostics.record_error('firebase')
     
     async def _publish_alert_async(self, alert):
         """Publish alert to Firebase asynchronously"""
@@ -248,11 +261,35 @@ class RaspServer:
                 
                 # Publish heartbeat to Firebase (keeps device status as "online")
                 self.firebase.publish_heartbeat()
+                self.diagnostics.record_heartbeat()
                 logger.debug("Heartbeat published to Firebase")
                 
             except Exception as e:
                 logger.error(f"Error in heartbeat loop: {e}")
+                self.diagnostics.record_error('firebase')
                 await asyncio.sleep(5)
+    
+    async def _metrics_loop(self):
+        """Publish diagnostic metrics to Firebase (every 5 minutes)"""
+        logger.info("Starting metrics loop (5-minute interval)")
+        
+        while self.running:
+            try:
+                await asyncio.sleep(300)  # Publish metrics every 5 minutes
+                
+                # Get health summary and publish to Firebase
+                health_summary = self.diagnostics.get_compact_summary()
+                self.firebase.publish_status_update({
+                    "diagnostics": health_summary
+                })
+                
+                # Log summary to journal
+                self.diagnostics.log_summary()
+                
+            except Exception as e:
+                logger.error(f"Error in metrics loop: {e}")
+                self.diagnostics.record_error('firebase')
+                await asyncio.sleep(10)
     
     async def _sync_remaining_data(self):
         """Sync all unsynced data to cloud (non-blocking)"""

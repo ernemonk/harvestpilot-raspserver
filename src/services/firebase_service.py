@@ -84,7 +84,7 @@ class FirebaseService:
         try:
             path = f"devices/{self.device_id}"
             now = datetime.now()
-            self.db.reference(path).update({
+            db.reference(path).update({
                 "status": status,
                 "lastSeen": now.isoformat(),
                 "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
@@ -103,7 +103,7 @@ class FirebaseService:
             
             # Realtime DB for live data
             path = f"devices/{self.device_id}/sensors/latest"
-            self.db.reference(path).set(sensor_reading.to_dict())
+            db.reference(path).set(sensor_reading.to_dict())
             
             # Firestore for historical analytics
             self.firestore_db.collection("devices").document(
@@ -122,7 +122,7 @@ class FirebaseService:
                 return
             
             path = f"devices/{self.device_id}/status"
-            self.db.reference(path).update(status_data)
+            db.reference(path).update(status_data)
             
             logger.debug(f"Published status update")
             
@@ -157,7 +157,7 @@ class FirebaseService:
         """Mark command as processed"""
         try:
             path = f"devices/{self.device_id}/commands/{cmd_id}/processed"
-            self.db.reference(path).set(True)
+            db.reference(path).set(True)
         except Exception as e:
             logger.error(f"Failed to mark command processed: {e}")
     
@@ -169,7 +169,7 @@ class FirebaseService:
             
             now = datetime.now()
             path = f"devices/{self.device_id}"
-            self.db.reference(path).update({
+            db.reference(path).update({
                 "status": "online",
                 "lastHeartbeat": int(now.timestamp() * 1000),
                 "lastSyncAt": now.isoformat(),

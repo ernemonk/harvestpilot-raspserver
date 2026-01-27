@@ -123,7 +123,15 @@ class DeviceManager:
                         "light": config.LED_PWM_FREQUENCY,
                         "motor": config.MOTOR_PWM_FREQUENCY,
                     }
+                # Sharing and access control
+                # Device is open to all users by default unless first owner locks it
+                "users": [],  # Will be populated when first user accesses
+                "accessControl": {
+                    "mode": "open",  # 'open' | 'whitelist'
+                    "allowedUsers": [],  # Populated by first user
+                    "lockedAt": None
                 },
+                "firstOwnerId": None,  # Set when first user accesses device
                 "metadata": device_info or {}
             }
             

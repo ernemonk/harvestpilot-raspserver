@@ -90,7 +90,14 @@ class FirebaseService:
                 "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
                 "lastSyncAt": now.isoformat(),
             }
-            # Use set() to create or overwrite
+            # First ensure parent path exists by setting root
+            try:
+                db.reference("devices").get()
+            except:
+                # Create devices root if it doesn't exist
+                db.reference("devices").set({})
+            
+            # Now set the device record
             db.reference(path).set(update_data)
             logger.info(f"Device status updated to: {status}")
         except Exception as e:

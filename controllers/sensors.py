@@ -14,16 +14,27 @@ class SensorController:
     """Read sensors"""
     
     def __init__(self):
+        self.dht_sensor = None
+        self.sensor_error = None
+        
         if not config.SIMULATE_HARDWARE:
-            self.dht_sensor = adafruit_dht.DHT22(getattr(board, f'D{config.SENSOR_DHT22_PIN}'))
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(config.SENSOR_WATER_LEVEL_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            try:
+                self.dht_sensor = adafruit_dht.DHT22(getattr(board, f'D{config.SENSOR_DHT22_PIN}'))
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setup(config.SENSOR_WATER_LEVEL_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                logger.info("Real sensors initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize real sensors, falling back to simulation: {e}")
+                self.sensor_error = e
+                config.SIMULATE_HARDWARE = True
+        else:
+            logger.info("Using hardware simulation")
         
         logger.info("Sensor controller initialized")
     
     async def read_all(self):
         """Read all sensors"""
-        if config.SIMULATE_HARDWARE:
+        if config.SIMULATE_HARDWARE or self.dht_sensor is None:
             import random
             return {
                 "timestamp": datetime.utcnow().isoformat(),

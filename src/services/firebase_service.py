@@ -16,7 +16,6 @@ class FirebaseService:
     """High-level Firebase service for data sync and commands"""
     
     def __init__(self):
-        self.db = None
         self.firestore_db = None
         self.connected = False
         self.device_id = config.DEVICE_ID
@@ -51,7 +50,6 @@ class FirebaseService:
                     'databaseURL': config.FIREBASE_DATABASE_URL
                 })
             
-            self.db = db.reference()
             self.firestore_db = firestore.client()
             self.connected = True
             
@@ -80,9 +78,8 @@ class FirebaseService:
         self._update_device_status("offline")
     
     def _update_device_status(self, status):
-        """Update device status"""
+        """Update device status in Firestore"""
         try:
-            path = f"devices/{self.device_id}"
             now = datetime.now()
             update_data = {
                 "status": status,
@@ -90,40 +87,28 @@ class FirebaseService:
                 "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
                 "lastSyncAt": now.isoformat(),
             }
-            # Try to set the device record - Firebase will create paths as needed
-            db.reference(path).set(update_data)
+            # Use Firestore exclusively
+            self.firestore_db.collection("devices").document(
+                self.device_id
+            ).set(update_data, merge=True)
             logger.info(f"Device status updated to: {status}")
         except Exception as e:
-            logger.debug(f"Failed to update device status in Realtime DB: {e}")
-            # Fallback to Firestore
-            try:
-                self.firestore_db.collection("devices").document(
-                    self.device_id
-                ).set({
-                    "status": status,
-                    "lastSeen": now.isoformat(),
-                    "lastHeartbeat": int(now.timestamp() * 1000),
-                    "lastSyncAt": now.isoformat(),
-                }, merge=True)
-                logger.info(f"Device status updated to: {status} (via Firestore)")
-            except Exception as fs_e:
-                logger.error(f"Failed to update device status: {fs_e}")
+            logger.error(f"Failed to update device status: {e}")
     
     def publish_sensor_data(self, sensor_reading: SensorReading):
-        """Publish sensor reading to Firebase"""
+        """Publish sensor reading to Firestore"""
         try:
             if not self.connected:
                 logger.warning("Cannot publish - Firebase not connected")
                 return
             
-            # Realtime DB for live data
-            path = f"devices/{self.device_id}/sensors/latest"
-            db.reference(path).set(sensor_reading.to_dict())
-            
-            # Firestore for historical analytics
+            # Firestore for live data and historical analytics
             self.firestore_db.collection("devices").document(
                 self.device_id
-            ).collection("sensor_history").add(sensor_reading.to_dict())
+            ).collection("sensor_readings").add({
+                **sensor_reading.to_dict(),
+                "timestamp": datetime.now().isoformat()
+            })
             
             logger.debug(f"Published sensor data")
             
@@ -131,13 +116,18 @@ class FirebaseService:
             logger.error(f"Failed to publish sensor data: {e}")
     
     def publish_status_update(self, status_data: dict):
-        """Publish operational status (pump, lights, etc)"""
+        """Publish operational status (pump, lights, etc) to Firestore"""
         try:
             if not self.connected:
                 return
             
-            path = f"devices/{self.device_id}/status"
-            db.reference(path).update(status_data)
+            # Update device document with current status
+            self.firestore_db.collection("devices").document(
+                self.device_id
+            ).set({
+                "status_data": status_data,
+                "lastUpdated": datetime.now().isoformat()
+            }, merge=True)
             
             logger.debug(f"Published status update")
             
@@ -169,26 +159,31 @@ class FirebaseService:
             logger.error(f"Error routing command: {e}")
     
     def _mark_command_processed(self, cmd_id: str):
-        """Mark command as processed"""
+        """Mark command as processed in Firestore"""
         try:
-            path = f"devices/{self.device_id}/commands/{cmd_id}/processed"
-            db.reference(path).set(True)
+            self.firestore_db.collection("devices").document(
+                self.device_id
+            ).collection("commands").document(cmd_id).set({
+                "processed": True,
+                "processedAt": datetime.now().isoformat()
+            }, merge=True)
         except Exception as e:
             logger.error(f"Failed to mark command processed: {e}")
     
     def publish_heartbeat(self):
-        """Publish periodic heartbeat to show device is alive"""
+        """Publish periodic heartbeat to Firestore to show device is alive"""
         try:
             if not self.connected:
                 return
             
             now = datetime.now()
-            path = f"devices/{self.device_id}"
-            db.reference(path).update({
+            self.firestore_db.collection("devices").document(
+                self.device_id
+            ).set({
                 "status": "online",
                 "lastHeartbeat": int(now.timestamp() * 1000),
                 "lastSyncAt": now.isoformat(),
-            })
+            }, merge=True)
             logger.debug(f"Heartbeat published")
         except Exception as e:
             logger.error(f"Failed to publish heartbeat: {e}")

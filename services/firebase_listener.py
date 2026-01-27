@@ -69,7 +69,8 @@ class FirebaseDeviceListener:
     async def _listen_for_commands(self):
         """Listen for control commands in Firebase"""
         try:
-            commands_ref = self.db.child(f"devices/{self.device_id}/commands")
+            # Listen on config device ID (primary path for webapp commands)
+            commands_ref = self.db.child(f"devices/{config.DEVICE_ID}/commands")
             
             def commands_callback(message):
                 """Handle incoming commands"""
@@ -78,7 +79,13 @@ class FirebaseDeviceListener:
             
             # Set up stream listener
             commands_ref.listen(commands_callback)
-            logger.info(f"Command listener started for {self.device_id}")
+            logger.info(f"Command listener started for {config.DEVICE_ID}")
+            
+            # Also listen on generated Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                commands_ref_fb = self.db.child(f"devices/{self.device_id}/commands")
+                commands_ref_fb.listen(commands_callback)
+                logger.info(f"Command listener also started for {self.device_id}")
             
         except Exception as e:
             logger.error(f"Error setting up command listener: {e}", exc_info=True)
@@ -108,6 +115,7 @@ class FirebaseDeviceListener:
         try:
             device_data = {
                 "device_id": self.device_id,
+                "config_device_id": config.DEVICE_ID,
                 "status": "online",
                 "registered_at": datetime.now().isoformat(),
                 "last_seen": datetime.now().isoformat(),
@@ -122,9 +130,15 @@ class FirebaseDeviceListener:
                 "gpio_config": self._get_gpio_config(),
             }
             
-            # Write device info to Firebase
-            self.db.child(f"devices/{self.device_id}").update(device_data)
-            logger.info(f"Device registered: {self.device_id}")
+            # Write device info to Firebase using config DEVICE_ID (primary lookup key)
+            # This allows webapp to find device by "raspserver-001" instead of "hp-XXXXXXXX"
+            self.db.child(f"devices/{config.DEVICE_ID}").update(device_data)
+            logger.info(f"Device registered with ID: {config.DEVICE_ID}")
+            
+            # Also register with generated Firebase ID for redundancy
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}").update(device_data)
+                logger.info(f"Device also registered with Firebase ID: {self.device_id}")
             
             return device_data
             
@@ -426,10 +440,17 @@ class FirebaseDeviceListener:
                 "status": status,
                 "data": data,
                 "timestamp": datetime.now().isoformat(),
-                "device_id": self.device_id
+                "device_id": self.device_id,
+                "config_device_id": config.DEVICE_ID
             }
             
-            self.db.child(f"devices/{self.device_id}/responses/{command_id}").set(response)
+            # Send response to config device ID (where webapp expects it)
+            self.db.child(f"devices/{config.DEVICE_ID}/responses/{command_id}").set(response)
+            
+            # Also send to Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}/responses/{command_id}").set(response)
+            
             logger.info(f"Response sent for command {command_id}: {status}")
             
         except Exception as e:
@@ -449,7 +470,11 @@ class FirebaseDeviceListener:
         """Publish device status to Firebase"""
         try:
             status_data["timestamp"] = datetime.now().isoformat()
-            self.db.child(f"devices/{self.device_id}/status").update(status_data)
+            # Publish to both config device ID and Firebase ID
+            self.db.child(f"devices/{config.DEVICE_ID}/status").update(status_data)
+            
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}/status").update(status_data)
         except Exception as e:
             logger.error(f"Error publishing status: {e}")
     

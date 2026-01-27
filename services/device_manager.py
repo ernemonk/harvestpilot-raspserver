@@ -127,11 +127,18 @@ class DeviceManager:
                 "metadata": device_info or {}
             }
             
-            # Write to Firebase
-            self.db.child(f"devices/{self.device_id}").set(registration_data)
+            # Write to Firebase using config DEVICE_ID as primary key (for webapp lookup)
+            self.db.child(f"devices/{config.DEVICE_ID}").set(registration_data)
+            
+            # Also write to generated Firebase ID for redundancy
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}").set(registration_data)
+            
             self.device_info = registration_data
             
-            logger.info(f"Device registered successfully: {self.device_id}")
+            logger.info(f"Device registered successfully at: devices/{config.DEVICE_ID}")
+            if self.device_id != config.DEVICE_ID:
+                logger.info(f"Device also registered at: devices/{self.device_id}")
             return registration_data
         
         except Exception as e:
@@ -155,7 +162,13 @@ class DeviceManager:
             if status_data:
                 update_data.update(status_data)
             
-            self.db.child(f"devices/{self.device_id}").update(update_data)
+            # Update at config device ID (primary path for webapp)
+            self.db.child(f"devices/{config.DEVICE_ID}").update(update_data)
+            
+            # Also update at Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}").update(update_data)
+            
             logger.info(f"Device status updated: {status}")
         
         except Exception as e:
@@ -191,7 +204,12 @@ class DeviceManager:
                 "timestamp": datetime.now().isoformat(),
             }
             
-            self.db.child(f"devices/{self.device_id}/telemetry").set(telemetry_data)
+            # Publish to config device ID (primary path)
+            self.db.child(f"devices/{config.DEVICE_ID}/telemetry").set(telemetry_data)
+            
+            # Also publish to Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}/telemetry").set(telemetry_data)
         
         except Exception as e:
             logger.error(f"Error publishing telemetry: {e}", exc_info=True)
@@ -199,8 +217,17 @@ class DeviceManager:
     async def get_device_info(self) -> Dict[str, Any]:
         """Get device information from Firebase"""
         try:
-            data = self.db.child(f"devices/{self.device_id}").get()
-            return data.val() or {}
+            # Try config device ID first (primary path)
+            data = self.db.child(f"devices/{config.DEVICE_ID}").get()
+            if data.val():
+                return data.val()
+            
+            # Fallback to Firebase ID if not found
+            if self.device_id != config.DEVICE_ID:
+                data = self.db.child(f"devices/{self.device_id}").get()
+                return data.val() or {}
+            
+            return {}
         except Exception as e:
             logger.error(f"Error getting device info: {e}")
             return {}
@@ -244,7 +271,13 @@ class DeviceManager:
                 "registered_at": datetime.now().isoformat(),
             }
             
-            self.db.child(f"devices/{self.device_id}/pins/{pin_number}").set(pin_data)
+            # Register at config device ID (primary path)
+            self.db.child(f"devices/{config.DEVICE_ID}/pins/{pin_number}").set(pin_data)
+            
+            # Also register at Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}/pins/{pin_number}").set(pin_data)
+            
             logger.info(f"Pin registered: GPIO{pin_number} ({pin_name})")
         
         except Exception as e:
@@ -253,8 +286,17 @@ class DeviceManager:
     async def get_pins_config(self) -> Dict[int, Dict[str, Any]]:
         """Get all registered pins configuration"""
         try:
-            data = self.db.child(f"devices/{self.device_id}/pins").get()
-            return data.val() or {}
+            # Try config device ID first (primary path)
+            data = self.db.child(f"devices/{config.DEVICE_ID}/pins").get()
+            if data.val():
+                return data.val()
+            
+            # Fallback to Firebase ID if not found
+            if self.device_id != config.DEVICE_ID:
+                data = self.db.child(f"devices/{self.device_id}/pins").get()
+                return data.val() or {}
+            
+            return {}
         except Exception as e:
             logger.error(f"Error getting pins config: {e}")
             return {}
@@ -274,7 +316,12 @@ class DeviceManager:
                 "timestamp": datetime.now().isoformat(),
             }
             
-            self.db.child(f"devices/{self.device_id}/pins/{pin_number}/state").set(state_data)
+            # Update at config device ID (primary path)
+            self.db.child(f"devices/{config.DEVICE_ID}/pins/{pin_number}/state").set(state_data)
+            
+            # Also update at Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}/pins/{pin_number}/state").set(state_data)
         
         except Exception as e:
             logger.error(f"Error setting pin state: {e}")
@@ -291,7 +338,12 @@ class DeviceManager:
             }
             
             error_id = str(uuid.uuid4())[:8]
-            self.db.child(f"devices/{self.device_id}/errors/{error_id}").set(error_data)
+            # Record at config device ID (primary path)
+            self.db.child(f"devices/{config.DEVICE_ID}/errors/{error_id}").set(error_data)
+            
+            # Also record at Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                self.db.child(f"devices/{self.device_id}/errors/{error_id}").set(error_data)
             
             logger.info(f"Error recorded: {error_type}")
         
@@ -301,7 +353,15 @@ class DeviceManager:
     async def get_device_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Get recent device logs"""
         try:
-            data = self.db.child(f"devices/{self.device_id}/logs").limit_to_last(limit).get()
+            # Try config device ID first (primary path)
+            data = self.db.child(f"devices/{config.DEVICE_ID}/logs").limit_to_last(limit).get()
+            
+            if data.val():
+                return [log for log in data.val().values() if isinstance(log, dict)]
+            
+            # Fallback to Firebase ID if not found
+            if self.device_id != config.DEVICE_ID:
+                data = self.db.child(f"devices/{self.device_id}/logs").limit_to_last(limit).get()
             logs = []
             
             if data.val():

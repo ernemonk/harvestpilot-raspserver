@@ -71,6 +71,7 @@ class RaspServer:
                 self._sensor_reading_loop(),
                 self._aggregation_loop(),        # New: aggregate buffered data every 60s
                 self._sync_to_cloud_loop(),     # Sync aggregated data every 30+ min
+                self._heartbeat_loop(),         # Keep-alive signal to Firebase every 30s
             ]
             
             if config.AUTO_IRRIGATION_ENABLED or config.AUTO_LIGHTING_ENABLED:
@@ -236,6 +237,22 @@ class RaspServer:
             except Exception as e:
                 logger.error(f"Error in sync loop: {e}")
                 await asyncio.sleep(60)
+    
+    async def _heartbeat_loop(self):
+        """Send periodic heartbeat to Firebase to keep device online (every 30 seconds)"""
+        logger.info("Starting heartbeat loop (30-second interval)")
+        
+        while self.running:
+            try:
+                await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+                
+                # Publish heartbeat to Firebase (keeps device status as "online")
+                self.firebase.publish_heartbeat()
+                logger.debug("Heartbeat published to Firebase")
+                
+            except Exception as e:
+                logger.error(f"Error in heartbeat loop: {e}")
+                await asyncio.sleep(5)
     
     async def _sync_remaining_data(self):
         """Sync all unsynced data to cloud (non-blocking)"""

@@ -83,10 +83,14 @@ class FirebaseService:
         """Update device status"""
         try:
             path = f"devices/{self.device_id}"
+            now = datetime.now()
             self.db.child(path).update({
                 "status": status,
-                "lastSeen": datetime.now().isoformat()
+                "lastSeen": now.isoformat(),
+                "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
+                "lastSyncAt": now.isoformat(),
             })
+            logger.info(f"Device status updated to: {status}")
         except Exception as e:
             logger.error(f"Failed to update device status: {e}")
     
@@ -173,6 +177,23 @@ class FirebaseService:
             self.db.child(path).set(True)
         except Exception as e:
             logger.error(f"Failed to mark command processed: {e}")
+    
+    def publish_heartbeat(self):
+        """Publish periodic heartbeat to show device is alive"""
+        try:
+            if not self.connected:
+                return
+            
+            now = datetime.now()
+            path = f"devices/{self.device_id}"
+            self.db.child(path).update({
+                "status": "online",
+                "lastHeartbeat": int(now.timestamp() * 1000),
+                "lastSyncAt": now.isoformat(),
+            })
+            logger.debug(f"Heartbeat published")
+        except Exception as e:
+            logger.error(f"Failed to publish heartbeat: {e}")
     
     def register_command_handler(self, cmd_type: str, action: str, callback):
         """Register handler for command type/action"""

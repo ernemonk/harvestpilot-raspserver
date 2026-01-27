@@ -1,5 +1,6 @@
 """Database service - SQLite local storage for sensor data"""
 
+import os
 import sqlite3
 import logging
 import asyncio
@@ -18,7 +19,6 @@ class DatabaseService:
         # Resolve absolute path
         if db_path is None:
             # Use absolute path in /var/lib/harvestpilot or user home
-            import os
             db_dir = os.getenv('HARVEST_DATA_DIR', None)
             if not db_dir:
                 # Fallback: use home directory

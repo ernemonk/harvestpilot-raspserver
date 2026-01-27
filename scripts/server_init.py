@@ -35,6 +35,7 @@ class PiInitializer:
         self.pi_mac = None
         self.pi_hostname = None
         self.config_device_id = None
+        self.organization_id = None
         self.firestore = None
         
     def get_pi_serial(self) -> str:
@@ -91,16 +92,18 @@ class PiInitializer:
             return "unknown"
     
     def get_config_device_id(self) -> str:
-        """Get device ID from config"""
+        """Get device ID and organization ID from config"""
         try:
             # Add raspserver directory to path if needed
             sys.path.insert(0, str(Path(__file__).parent.parent))
             import config
             device_id = getattr(config, 'DEVICE_ID', 'raspserver-001')
-            logger.info(f"✅ Got config DEVICE_ID: {device_id}")
+            self.organization_id = getattr(config, 'ORGANIZATION_ID', 'default-org')
+            logger.info(f"✅ Got config DEVICE_ID: {device_id}, ORG_ID: {self.organization_id}")
             return device_id
         except Exception as e:
-            logger.warning(f"⚠️  Could not load config: {e}, using default")
+            logger.warning(f"⚠️  Could not load config: {e}, using defaults")
+            self.organization_id = 'default-org'
             return os.getenv('DEVICE_ID', 'raspserver-001')
     
     def initialize_firebase(self):
@@ -133,26 +136,28 @@ class PiInitializer:
             return False
     
     def register_in_firestore(self) -> bool:
-        """Register Pi in Firestore using hardware serial as document ID"""
+        """Register Pi in Firestore using config device ID as document ID"""
         try:
             if not self.firestore:
                 logger.error("❌ Firestore not initialized")
                 return False
             
-            # Create device document using Pi serial as UID
+            # Create device document using config device ID as Firestore document ID
             device_data = {
-                # Primary identifiers
-                "uid": self.pi_serial,  # Firestore document ID
+                # Identifiers - use config_device_id as primary
+                "deviceId": self.config_device_id,
+                "deviceName": self.config_device_id,
                 "hardware_serial": self.pi_serial,
                 "mac_address": self.pi_mac,
                 "hostname": self.pi_hostname,
                 "ip_address": self.get_ip_address(),
                 
-                # Configuration
-                "config_device_id": self.config_device_id,
+                # Organization
+                "organizationId": self.organization_id,
                 
                 # Status
                 "status": "online",
+                "lastHeartbeat": datetime.now().isoformat(),
                 "registered_at": datetime.now().isoformat(),
                 "initialized_at": datetime.now().isoformat(),
                 
@@ -169,11 +174,11 @@ class PiInitializer:
                 }
             }
             
-            # Write to Firestore
-            # Path: devices/{hardware_serial}
-            self.firestore.collection('devices').document(self.pi_serial).set(device_data)
+            # Write to Firestore using config device ID
+            # Path: devices/{config_device_id}
+            self.firestore.collection('devices').document(self.config_device_id).set(device_data)
             
-            logger.info(f"✅ Registered in Firestore: devices/{self.pi_serial}")
+            logger.info(f"✅ Registered in Firestore: devices/{self.config_device_id} (org: {self.organization_id})")
             return True
             
         except Exception as e:

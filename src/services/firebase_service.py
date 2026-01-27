@@ -83,8 +83,7 @@ class FirebaseService:
             now = datetime.now()
             update_data = {
                 "status": status,
-                "lastSeen": now.isoformat(),
-                "lastHeartbeat": int(now.timestamp() * 1000),  # milliseconds for JavaScript
+                "lastHeartbeat": now.isoformat(),
                 "lastSyncAt": now.isoformat(),
             }
             # Use Firestore exclusively

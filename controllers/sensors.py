@@ -1,13 +1,15 @@
-"""Sensor controller for Raspberry Pi"""
+"""Compatibility shim: use `src.controllers.sensors` instead.
 
-import logging
-from datetime import datetime
-import adafruit_dht
-import board
-import RPi.GPIO as GPIO
-import config
+This module is kept for backward compatibility and will re-export the
+implementation from `src.controllers.sensors`.
+"""
 
-logger = logging.getLogger(__name__)
+import warnings
+from src.controllers.sensors import SensorController  # type: ignore
+
+warnings.warn("controllers.sensors moved to src.controllers.sensors; please update imports.", DeprecationWarning)
+
+__all__ = ["SensorController"]
 
 
 class SensorController:

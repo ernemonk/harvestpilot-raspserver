@@ -1,10 +1,15 @@
-"""Lighting controller for Raspberry Pi"""
+"""Compatibility shim: use `src.controllers.lighting` instead.
 
-import logging
-import RPi.GPIO as GPIO
-import config
+This module is kept for backward compatibility and will re-export the
+implementation from `src.controllers.lighting`.
+"""
 
-logger = logging.getLogger(__name__)
+import warnings
+from src.controllers.lighting import LightingController  # type: ignore
+
+warnings.warn("controllers.lighting moved to src.controllers.lighting; please update imports.", DeprecationWarning)
+
+__all__ = ["LightingController"]
 
 
 class LightingController:

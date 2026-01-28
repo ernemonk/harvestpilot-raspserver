@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
-"""DEPRECATED: Moved to src/admin/clear_devices.py
+"""Clear devices from Firebase for fresh initialization"""
 
-This shim is maintained for backward compatibility.
-Use the new location: python3 src/admin/clear_devices.py
-"""
-
-import sys
-import warnings
+import firebase_admin
+from firebase_admin import db
+import json
+import base64
 from pathlib import Path
-
-warnings.warn(
-    "clear_devices.py moved to src/admin/clear_devices.py",
-    DeprecationWarning,
-    stacklevel=2
-)
-
-# Re-export from new location
-sys.path.insert(0, str(Path(__file__).parent / "src" / "admin"))
-exec(open(Path(__file__).parent / "src" / "admin" / "clear_devices.py").read())
 
 # Decode the base64 key
 key_b64_path = Path(__file__).parent.parent / "Codes" / "firebase-key-b64.txt"

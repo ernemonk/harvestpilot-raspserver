@@ -12,9 +12,7 @@ from ..utils.gpio_manager import cleanup_gpio
 import config
 
 # Import GPIO Actuator Controller for real-time Firestore control
-import sys
-sys.path.insert(0, str(config.BASE_DIR))
-from services.gpio_actuator_controller import GPIOActuatorController
+from ..services.gpio_actuator_controller import GPIOActuatorController
 
 logger = logging.getLogger(__name__)
 

@@ -1,26 +1,9 @@
 #!/usr/bin/env python3
-"""DEPRECATED: Moved to docs/examples/
-
-This shim is maintained for backward compatibility.
-Run the example from: docs/examples/dynamic_config_example.py
+"""
+Example: Configuring Different Pi Models with Different Pins
 """
 
-import sys
-import warnings
-from pathlib import Path
-
-warnings.warn(
-    "examples_dynamic_config.py moved to docs/examples/dynamic_config_example.py",
-    DeprecationWarning,
-    stacklevel=2
-)
-
-# Re-export from new location
-sys.path.insert(0, str(Path(__file__).parent / "docs" / "examples"))
-from dynamic_config_example import *  # noqa: F401, F403
-
-if __name__ == "__main__":
-    main()
+from utils.pin_config import PinConfigManager
 
 
 def setup_pi_1_standard():
@@ -271,7 +254,7 @@ def main():
         print("🔌 Dynamic GPIO Configuration - Setup Examples")
         print("="*70)
         print("\nUsage:")
-        print("  python3 examples_dynamic_config.py [command]")
+        print("  python3 dynamic_config_example.py [command]")
         print("\nCommands:")
         print("  pi1      - Setup Raspberry Pi 1 (standard pins)")
         print("  pi2      - Setup Raspberry Pi 2 (custom pins)")

@@ -1,4 +1,11 @@
-"""Firebase Client for RaspServer - Real-time sync with cloud agent"""
+"""DEPRECATED: Use `src.services.firebase_service.FirebaseService` instead.
+
+This module remains for backward compatibility. Prefer the implementation
+in `src/services/firebase_service.py` which is the canonical Firebase
+abstraction used by the server.
+"""
+import warnings
+warnings.warn("firebase_client.py is deprecated; use src.services.firebase_service", DeprecationWarning)
 
 import json
 import logging

@@ -24,7 +24,7 @@ def initialize_device():
     """Initialize Pi and register to Firestore (runs once on startup)"""
     try:
         logger.info("🚀 Running device initialization...")
-        init_script = Path(__file__).parent / "scripts" / "server_init.py"
+        init_script = Path(__file__).parent / "src" / "scripts" / "server_init.py"
         
         if init_script.exists():
             result = subprocess.run(

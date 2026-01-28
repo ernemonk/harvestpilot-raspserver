@@ -1,10 +1,15 @@
-"""Irrigation controller for Raspberry Pi"""
+"""Compatibility shim: use `src.controllers.irrigation` instead.
 
-import logging
-import RPi.GPIO as GPIO
-import config
+This module is kept for backward compatibility and will re-export the
+implementation from `src.controllers.irrigation`.
+"""
 
-logger = logging.getLogger(__name__)
+import warnings
+from src.controllers.irrigation import IrrigationController  # type: ignore
+
+warnings.warn("controllers.irrigation moved to src.controllers.irrigation; please update imports.", DeprecationWarning)
+
+__all__ = ["IrrigationController"]
 
 
 class IrrigationController:

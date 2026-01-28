@@ -1,17 +1,12 @@
-"""GPIO cleanup utility"""
+# This file has been moved to src/utils/
+# This shim is kept for backward compatibility
+import warnings
+import sys
+from pathlib import Path
 
-import logging
-import RPi.GPIO as GPIO
-import config
+_name = __file__.split('/')[-1]
+warnings.warn(f"utils/{_name} moved to src/utils/{_name}; please update imports", DeprecationWarning, stacklevel=2)
 
-logger = logging.getLogger(__name__)
-
-
-def cleanup_gpio():
-    """Cleanup GPIO pins on shutdown"""
-    if not config.SIMULATE_HARDWARE:
-        try:
-            GPIO.cleanup()
-            logger.info("GPIO cleanup complete")
-        except Exception as e:
-            logger.error(f"Error during GPIO cleanup: {e}")
+# Import from new location
+_module_name = _name[:-3]  # Remove .py
+exec(f"from src.utils.{_module_name} import *")

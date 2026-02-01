@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Clear devices from Firebase for fresh initialization"""
+"""Clear devices from Firestore for fresh initialization"""
 
 import firebase_admin
-from firebase_admin import db
+from firebase_admin import firestore
 import json
 import base64
 from pathlib import Path
@@ -15,18 +15,19 @@ with open(key_b64_path, encoding='utf-8-sig') as f:
 
 # Initialize Firebase
 cred = firebase_admin.credentials.Certificate(json.loads(key_json))
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://harvest-hub.firebaseio.com'
-})
+firebase_admin.initialize_app(cred)
 
-# Delete devices
-ref = db.reference('/devices')
-print("Deleting /devices...")
+# Delete devices from Firestore
+db = firestore.client()
+print("Deleting /devices from Firestore...")
 try:
-    ref.delete()
-    print("✅ Devices deleted successfully")
+    devices = db.collection('devices').stream()
+    for doc in devices:
+        doc.reference.delete()
+    print("✅ Devices deleted successfully from Firestore")
 except Exception as e:
     print(f"ℹ️  /devices already empty or doesn't exist: {e}")
+
 
 # Verify deletion
 ref = db.reference('/devices')

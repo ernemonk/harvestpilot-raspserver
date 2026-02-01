@@ -1,8 +1,8 @@
 """GPIO cleanup utility"""
 
 import logging
-import RPi.GPIO as GPIO
-import config
+from .gpio_import import GPIO
+from .. import config
 
 logger = logging.getLogger(__name__)
 

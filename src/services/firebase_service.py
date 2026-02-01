@@ -5,9 +5,9 @@ import logging
 import asyncio
 from datetime import datetime
 import firebase_admin
-from firebase_admin import credentials, db, firestore
+from firebase_admin import credentials, firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
-import config
+from .. import config
 from ..models import SensorReading, Command, DeviceStatus
 
 logger = logging.getLogger(__name__)
@@ -19,10 +19,11 @@ class FirebaseService:
     def __init__(self):
         self.firestore_db = None
         self.connected = False
-        self.device_id = config.DEVICE_ID
+        self.hardware_serial = config.HARDWARE_SERIAL  # Primary identifier
+        self.device_id = config.DEVICE_ID  # Human-readable alias (stored in document)
         self.callbacks = {}
         
-        logger.info("Firebase service initialized")
+        logger.info(f"Firebase service initialized (hardware_serial: {self.hardware_serial}, device_id: {self.device_id})")
     
     def connect(self):
         """Initialize Firebase connection"""
@@ -47,9 +48,7 @@ class FirebaseService:
                     raise PermissionError(f"No read permission for Firebase credentials")
                 
                 cred = credentials.Certificate(cred_path)
-                firebase_admin.initialize_app(cred, {
-                    'databaseURL': config.FIREBASE_DATABASE_URL
-                })
+                firebase_admin.initialize_app(cred)
             
             self.firestore_db = firestore.client()
             self.connected = True
@@ -79,18 +78,20 @@ class FirebaseService:
         self._update_device_status("offline")
     
     def _update_device_status(self, status):
-        """Update device status in Firestore"""
+        """Update device status in Firestore (using hardware_serial as primary key)"""
         try:
             update_data = {
                 "status": status,
+                "device_id": self.device_id,  # Store human-readable alias
+                "hardware_serial": self.hardware_serial,  # Primary identifier
                 "lastHeartbeat": SERVER_TIMESTAMP,
                 "lastSyncAt": SERVER_TIMESTAMP,
             }
-            # Use Firestore exclusively
+            # Use hardware_serial as Firestore document key
             self.firestore_db.collection("devices").document(
-                self.device_id
+                self.hardware_serial
             ).set(update_data, merge=True)
-            logger.info(f"Device status updated to: {status}")
+            logger.info(f"Device status updated to: {status} (serial: {self.hardware_serial})")
         except Exception as e:
             logger.error(f"Failed to update device status: {e}")
     
@@ -101,9 +102,9 @@ class FirebaseService:
                 logger.warning("Cannot publish - Firebase not connected")
                 return
             
-            # Firestore for live data and historical analytics
+            # Firestore for live data and historical analytics (using hardware_serial as key)
             self.firestore_db.collection("devices").document(
-                self.device_id
+                self.hardware_serial
             ).collection("sensor_readings").add({
                 **sensor_reading.to_dict(),
                 "timestamp": SERVER_TIMESTAMP
@@ -120,11 +121,13 @@ class FirebaseService:
             if not self.connected:
                 return
             
-            # Update device document with current status
+            # Update device document with current status (using hardware_serial as key)
             self.firestore_db.collection("devices").document(
-                self.device_id
+                self.hardware_serial
             ).set({
                 "status_data": status_data,
+                "device_id": self.device_id,
+                "hardware_serial": self.hardware_serial,
                 "lastUpdated": SERVER_TIMESTAMP
             }, merge=True)
             
@@ -161,7 +164,7 @@ class FirebaseService:
         """Mark command as processed in Firestore"""
         try:
             self.firestore_db.collection("devices").document(
-                self.device_id
+                self.hardware_serial
             ).collection("commands").document(cmd_id).set({
                 "processed": True,
                 "processedAt": SERVER_TIMESTAMP
@@ -176,9 +179,11 @@ class FirebaseService:
                 return
             
             self.firestore_db.collection("devices").document(
-                self.device_id
+                self.hardware_serial
             ).set({
                 "status": "online",
+                "device_id": self.device_id,
+                "hardware_serial": self.hardware_serial,
                 "lastHeartbeat": SERVER_TIMESTAMP,
                 "lastSyncAt": SERVER_TIMESTAMP,
             }, merge=True)

@@ -1,9 +1,9 @@
 #!/bin/bash
-# Setup script for HarvestPilot RaspServer with Firebase
+# Setup script for HarvestPilot RaspServer with Firestore
 
 set -e
 
-echo "Setting up HarvestPilot RaspServer with Firebase..."
+echo "Setting up HarvestPilot RaspServer with Firestore..."
 
 # Install system dependencies
 sudo apt-get update
@@ -12,23 +12,22 @@ sudo apt-get install -y libgpiod2 libgpiod-dev
 # Install Python dependencies
 pip3 install -r requirements.txt
 
-# Get Firebase credentials (user must provide this manually)
+# Get Firestore credentials (user must provide this manually)
 echo ""
 echo "================================================================"
-echo "IMPORTANT: Firebase Credentials Setup"
+echo "IMPORTANT: Firestore Credentials Setup"
 echo "================================================================"
 echo ""
 echo "You need to set up Firebase Admin SDK credentials:"
 echo "1. Go to your Firebase console"
 echo "2. Project Settings > Service Accounts"
 echo "3. Generate a new private key (JSON)"
-echo "4. Save it as 'firebase-key.json' in the RaspServer directory"
+echo "4. Save it as 'firebase-key.json' in the config/ directory"
 echo ""
 echo "Then set environment variables in .env:"
 echo "  DEVICE_ID=raspserver-001"
-echo "  FIREBASE_DATABASE_URL=https://YOUR-PROJECT.firebaseio.com"
 echo "  FIREBASE_PROJECT_ID=your-project-id"
-echo "  FIREBASE_CREDENTIALS_PATH=firebase-key.json"
+echo "  FIREBASE_CREDENTIALS_PATH=config/firebase-key.json"
 echo ""
 echo "================================================================"
 
@@ -39,10 +38,9 @@ if [ ! -f ".env" ]; then
 HARDWARE_PLATFORM=raspberry_pi
 SIMULATE_HARDWARE=false
 
-# Firebase Configuration
+# Firestore Configuration
 DEVICE_ID=raspserver-001
-FIREBASE_CREDENTIALS_PATH=firebase-key.json
-FIREBASE_DATABASE_URL=https://harvest-hub.firebaseio.com
+FIREBASE_CREDENTIALS_PATH=config/firebase-key.json
 FIREBASE_PROJECT_ID=harvest-hub
 
 # Automation Settings

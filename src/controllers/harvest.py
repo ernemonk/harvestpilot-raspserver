@@ -1,8 +1,8 @@
 """Harvest controller for Raspberry Pi"""
 
 import logging
-import RPi.GPIO as GPIO
-import config
+from ..utils.gpio_import import GPIO
+from .. import config
 
 logger = logging.getLogger(__name__)
 

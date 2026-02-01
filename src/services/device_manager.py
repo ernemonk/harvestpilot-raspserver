@@ -7,27 +7,29 @@ import os
 import subprocess
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from firebase_admin import db
-import config
+from firebase_admin import firestore
+from .. import config
 
 logger = logging.getLogger(__name__)
 
 
 class DeviceManager:
-    """Manage device registration, discovery, and status tracking"""
+    """Manage device registration, discovery, and status tracking using hardware_serial"""
     
-    def __init__(self, device_id: str = None):
+    def __init__(self, hardware_serial: str = None, device_id: str = None):
         """
         Initialize device manager
         
         Args:
-            device_id: Custom device ID (optional, auto-generated if not provided)
+            hardware_serial: Hardware serial (primary identifier, immutable)
+            device_id: Custom device ID (human-readable alias)
         """
-        self.device_id = device_id or self._generate_device_id()
-        self.db = db.reference()
+        self.hardware_serial = hardware_serial or config.HARDWARE_SERIAL
+        self.device_id = device_id or config.DEVICE_ID
+        self.firestore_db = firestore.client()
         self.device_info = {}
         
-        logger.info(f"Device Manager initialized with ID: {self.device_id}")
+        logger.info(f"Device Manager initialized (hardware_serial: {self.hardware_serial}, device_id: {self.device_id})")
     
     def _generate_device_id(self) -> str:
         """Generate unique device ID with 'hp-' prefix"""
@@ -60,7 +62,7 @@ class DeviceManager:
     
     async def register_device(self, device_info: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Register device in Firebase
+        Register device in Firestore using hardware_serial as primary key
         
         Args:
             device_info: Optional device metadata
@@ -69,27 +71,30 @@ class DeviceManager:
             Device registration data
         """
         try:
-            # Get Pi hardware identifiers
-            pi_serial = self._get_pi_serial()
-            pi_mac = self._get_pi_mac()
+            logger.info("[DEVICE REGISTRATION] 🔧 Starting device registration process...")
+            
+            # Use hardware_serial from config (already has smart fallback logic)
+            logger.debug("[DEVICE REGISTRATION] Reading device identifiers...")
+            hardware_serial = self.hardware_serial  # From config: Pi serial → .env HARDWARE_SERIAL → DEVICE_ID → hostname
+            pi_mac = self._get_pi_mac()  # Try to get MAC if available
+            logger.info(f"[DEVICE REGISTRATION] 📱 Hardware Serial: {hardware_serial}, Mac: {pi_mac}")
             
             registration_data = {
-                # TIER 1: Hardware IDs (Raspberry Pi unique identifiers)
-                "hardware_serial": pi_serial,
+                # PRIMARY KEY: Hardware Serial (immutable, tamper-proof)
+                # Fallback chain: Pi /proc/cpuinfo → .env HARDWARE_SERIAL → DEVICE_ID → hostname
+                "hardware_serial": hardware_serial,
                 "mac_address": pi_mac,
                 
-                # TIER 2: Config Device ID
+                # HUMAN-READABLE ALIAS
+                "device_id": self.device_id,
                 "config_device_id": config.DEVICE_ID,
                 
-                # TIER 3: Firebase Device ID
-                "device_id": self.device_id,
-                
-                # Device Mapping (links all three)
+                # Device Mapping (links all identifiers)
                 "device_mapping": {
-                    "hardware_serial": pi_serial,
+                    "hardware_serial": hardware_serial,
                     "hardware_mac": pi_mac,
+                    "device_id": self.device_id,
                     "config_id": config.DEVICE_ID,
-                    "firebase_id": self.device_id,
                     "linked_at": datetime.now().isoformat()
                 },
                 
@@ -109,7 +114,7 @@ class DeviceManager:
                 },
                 "hardware": {
                     "model": "Raspberry Pi 4B",
-                    "serial": pi_serial,
+                    "serial": hardware_serial,
                     "mac": pi_mac,
                     "gpio_pins": {
                         "pump_pwm": config.PUMP_PWM_PIN,
@@ -124,68 +129,61 @@ class DeviceManager:
                         "motor": config.MOTOR_PWM_FREQUENCY,
                     }
                 },
-                # Sharing and access control
-                # Device is open to all users by default unless first owner locks it
-                "users": [],  # Will be populated when first user accesses
-                "accessControl": {
-                    "mode": "open",  # 'open' | 'whitelist'
-                    "allowedUsers": [],  # Populated by first user
-                    "lockedAt": None
-                },
-                "firstOwnerId": None,  # Set when first user accesses device
                 "metadata": device_info or {}
             }
             
-            # Write to Firebase using config DEVICE_ID as primary key (for webapp lookup)
-            self.db.child(f"devices/{config.DEVICE_ID}").set(registration_data)
-            
-            # Also write to generated Firebase ID for redundancy
-            if self.device_id != config.DEVICE_ID:
-                self.db.child(f"devices/{self.device_id}").set(registration_data)
+            # Write to Firestore using hardware_serial as primary key
+            logger.info(f"[DEVICE REGISTRATION] 📝 Writing registration to: devices/{hardware_serial}")
+            self.firestore_db.collection("devices").document(hardware_serial).set(registration_data, merge=True)
+            logger.info(f"[DEVICE REGISTRATION] ✅ Successfully registered at hardware_serial key")
             
             self.device_info = registration_data
             
-            logger.info(f"Device registered successfully at: devices/{config.DEVICE_ID}")
-            if self.device_id != config.DEVICE_ID:
-                logger.info(f"Device also registered at: devices/{self.device_id}")
+            logger.info(f"[DEVICE REGISTRATION] ✅ DEVICE REGISTRATION COMPLETE")
+            logger.info(f"[DEVICE REGISTRATION] Device Identifiers:")
+            logger.info(f"[DEVICE REGISTRATION]   - Primary Key (hardware_serial): {hardware_serial}")
+            logger.info(f"[DEVICE REGISTRATION]   - Human-readable alias (device_id): {self.device_id}")
+            logger.info(f"[DEVICE REGISTRATION]   - Config ID: {config.DEVICE_ID}")
+            
             return registration_data
         
         except Exception as e:
-            logger.error(f"Device registration failed: {e}", exc_info=True)
+            logger.error(f"[DEVICE REGISTRATION] ❌ Device registration FAILED: {e}", exc_info=True)
             raise
     
     async def update_status(self, status: str = "online", status_data: Dict[str, Any] = None):
         """
-        Update device status
+        Update device status in Firestore using hardware_serial
         
         Args:
             status: Device status (online|offline|error)
             status_data: Additional status information
         """
         try:
+            logger.debug(f"[DEVICE STATUS] Updating device status to: {status}")
+            
             update_data = {
                 "status": status,
                 "last_seen": datetime.now().isoformat(),
+                "device_id": self.device_id,
+                "hardware_serial": self.hardware_serial,
             }
             
             if status_data:
                 update_data.update(status_data)
             
-            # Update at config device ID (primary path for webapp)
-            self.db.child(f"devices/{config.DEVICE_ID}").update(update_data)
+            # Update in Firestore using hardware_serial as key
+            logger.debug(f"[DEVICE STATUS] Writing to: devices/{self.hardware_serial}")
+            self.firestore_db.collection("devices").document(self.hardware_serial).set(update_data, merge=True)
             
-            # Also update at Firebase ID if different
-            if self.device_id != config.DEVICE_ID:
-                self.db.child(f"devices/{self.device_id}").update(update_data)
-            
-            logger.info(f"Device status updated: {status}")
+            logger.info(f"[DEVICE STATUS] ✓ Device status updated: {status}")
         
         except Exception as e:
-            logger.error(f"Error updating device status: {e}", exc_info=True)
+            logger.error(f"[DEVICE STATUS] ❌ Error updating device status: {e}", exc_info=True)
     
     async def publish_telemetry(self, telemetry: Dict[str, Any]):
         """
-        Publish device telemetry data
+        Publish device telemetry data to Firestore
         
         Telemetry structure:
         {
@@ -210,24 +208,22 @@ class DeviceManager:
         try:
             telemetry_data = {
                 **telemetry,
+                "device_id": self.device_id,
+                "hardware_serial": self.hardware_serial,
                 "timestamp": datetime.now().isoformat(),
             }
             
-            # Publish to config device ID (primary path)
-            self.db.child(f"devices/{config.DEVICE_ID}/telemetry").set(telemetry_data)
-            
-            # Also publish to Firebase ID if different
-            if self.device_id != config.DEVICE_ID:
-                self.db.child(f"devices/{self.device_id}/telemetry").set(telemetry_data)
+            # Publish to Firestore using hardware_serial as key
+            self.firestore_db.collection("devices").document(self.hardware_serial).collection("telemetry").add(telemetry_data)
         
         except Exception as e:
             logger.error(f"Error publishing telemetry: {e}", exc_info=True)
     
     async def get_device_info(self) -> Dict[str, Any]:
-        """Get device information from Firebase"""
+        """Get device information from Firestore using hardware_serial"""
         try:
-            # Try config device ID first (primary path)
-            data = self.db.child(f"devices/{config.DEVICE_ID}").get()
+            # Get document from Firestore using hardware_serial
+            doc = self.firestore_db.collection("devices").document(self.hardware_serial).get()
             if data.val():
                 return data.val()
             

@@ -1,4 +1,4 @@
-"""Firebase Realtime Database Listeners for Device Control"""
+"""Firestore Listeners for Device Control"""
 
 import asyncio
 import logging
@@ -6,21 +6,22 @@ import json
 from datetime import datetime
 from typing import Callable, Dict, Any, Optional
 import firebase_admin
-from firebase_admin import db
-import config
+from firebase_admin import firestore
+from .. import config
 
 logger = logging.getLogger(__name__)
 
 
 class FirebaseDeviceListener:
-    """Listen for Firebase commands and manage device control"""
+    """Listen for Firebase commands and manage device control using hardware_serial"""
     
-    def __init__(self, device_id: str, gpio_controller=None, controllers_map: Dict[str, Any] = None):
+    def __init__(self, hardware_serial: str, device_id: str = None, gpio_controller=None, controllers_map: Dict[str, Any] = None):
         """
         Initialize Firebase listener
         
         Args:
-            device_id: Device identifier (e.g., "hp-001")
+            hardware_serial: Hardware serial (primary device identifier)
+            device_id: Device ID alias (human-readable, optional)
             gpio_controller: GPIO manager instance
             controllers_map: Dict mapping controller names to controller instances
                 {
@@ -30,15 +31,16 @@ class FirebaseDeviceListener:
                     "sensors": SensorController
                 }
         """
-        self.device_id = device_id
+        self.hardware_serial = hardware_serial
+        self.device_id = device_id or config.DEVICE_ID
         self.gpio_controller = gpio_controller
         self.controllers_map = controllers_map or {}
-        self.db = db.reference()
+        self.firestore_db = firestore.client()
         self.listeners = []
         self.command_handlers = {}
         self._setup_handlers()
         
-        logger.info(f"Firebase listener initialized for device: {device_id}")
+        logger.info(f"Firebase listener initialized (hardware_serial: {hardware_serial}, device_id: {device_id})")
     
     def _setup_handlers(self):
         """Setup command handlers"""
@@ -74,21 +76,27 @@ class FirebaseDeviceListener:
             
             def commands_callback(message):
                 """Handle incoming commands"""
+                logger.debug(f"[FIREBASE LISTENER] Raw message received: {message}")
                 if message.data:
+                    logger.info(f"[FIREBASE LISTENER] 🔔 NEW COMMAND DETECTED from Firebase: {message.data}")
                     asyncio.create_task(self._process_command(message.data))
+                else:
+                    logger.debug("[FIREBASE LISTENER] Message has no data payload")
             
             # Set up stream listener
             commands_ref.listen(commands_callback)
-            logger.info(f"Command listener started for {config.DEVICE_ID}")
+            logger.info(f"[FIREBASE LISTENER] ✅ Command listener STARTED for {config.DEVICE_ID}")
+            logger.info(f"[FIREBASE LISTENER] 👂 Listening on path: devices/{config.DEVICE_ID}/commands")
             
             # Also listen on generated Firebase ID if different
             if self.device_id != config.DEVICE_ID:
                 commands_ref_fb = self.db.child(f"devices/{self.device_id}/commands")
                 commands_ref_fb.listen(commands_callback)
-                logger.info(f"Command listener also started for {self.device_id}")
+                logger.info(f"[FIREBASE LISTENER] ✅ Command listener also STARTED for {self.device_id}")
+                logger.info(f"[FIREBASE LISTENER] 👂 Listening on path: devices/{self.device_id}/commands")
             
         except Exception as e:
-            logger.error(f"Error setting up command listener: {e}", exc_info=True)
+            logger.error(f"[FIREBASE LISTENER] ❌ Error setting up command listener: {e}", exc_info=True)
     
     async def _listen_for_registration(self):
         """Listen for device registration requests"""
@@ -150,30 +158,36 @@ class FirebaseDeviceListener:
         """Process incoming Firebase command"""
         try:
             if not isinstance(command_data, dict):
-                logger.warning(f"Invalid command format: {command_data}")
+                logger.warning(f"[COMMAND PROCESSOR] ❌ Invalid command format (not dict): {command_data}")
                 return
             
             command_type = command_data.get("type")
             command_id = command_data.get("id", "unknown")
             
             if not command_type:
-                logger.warning("Command missing 'type' field")
+                logger.warning("[COMMAND PROCESSOR] ❌ Command missing 'type' field")
                 return
             
-            logger.info(f"Processing command: {command_type} (ID: {command_id})")
+            logger.info(f"[COMMAND PROCESSOR] 🚀 Processing command: {command_type} (ID: {command_id})")
+            logger.debug(f"[COMMAND PROCESSOR] Full command data: {command_data}")
             
             # Route to appropriate handler
             handler = self.command_handlers.get(command_type)
             if handler:
+                logger.info(f"[COMMAND PROCESSOR] ✓ Handler found for type '{command_type}', executing...")
                 result = await handler(command_data)
+                logger.info(f"[COMMAND PROCESSOR] ✓ Handler completed successfully for '{command_type}'")
+                logger.debug(f"[COMMAND PROCESSOR] Handler result: {result}")
                 await self._send_response(command_id, command_type, "success", result)
             else:
-                logger.warning(f"Unknown command type: {command_type}")
+                logger.warning(f"[COMMAND PROCESSOR] ❌ Unknown command type: {command_type}")
+                logger.warning(f"[COMMAND PROCESSOR] Available handlers: {list(self.command_handlers.keys())}")
                 await self._send_response(command_id, command_type, "error", 
                                         f"Unknown command type: {command_type}")
         
         except Exception as e:
-            logger.error(f"Error processing command: {e}", exc_info=True)
+            logger.error(f"[COMMAND PROCESSOR] ❌ Error processing command: {e}", exc_info=True)
+            logger.error(f"[COMMAND PROCESSOR] Command data was: {command_data}")
             await self._send_response(command_data.get("id", "unknown"), 
                                     command_data.get("type", "unknown"),
                                     "error", str(e))
@@ -187,39 +201,48 @@ class FirebaseDeviceListener:
             "pin": 17,
             "action": "on|off",
             "duration": 5  # optional, in seconds
-        }
-        """
-        pin = command.get("pin")
-        action = command.get("action", "").lower()
-        duration = command.get("duration")
+        logger.debug(f"[PIN CONTROL] Validating command: pin={pin}, action={action}, duration={duration}")
         
         if not pin or action not in ["on", "off"]:
             raise ValueError("pin_control requires: pin (int) and action ('on'|'off')")
         
-        logger.info(f"Pin control: GPIO{pin} -> {action}")
+        logger.info(f"[PIN CONTROL] 🔌 GPIO{pin} control requested: {action.upper()}")
         
         if config.SIMULATE_HARDWARE:
-            logger.info(f"[SIMULATION] GPIO{pin} -> {action}")
+            logger.info(f"[PIN CONTROL] 🎭 [SIMULATION MODE] GPIO{pin} -> {action.upper()}")
             return {"pin": pin, "action": action, "status": "simulated"}
         
         try:
             import RPi.GPIO as GPIO
+            logger.debug(f"[PIN CONTROL] Setting GPIO mode to BCM")
             GPIO.setmode(GPIO.BCM)
+            logger.debug(f"[PIN CONTROL] Setting GPIO{pin} as OUTPUT")
             GPIO.setup(pin, GPIO.OUT)
             
             if action == "on":
+                logger.info(f"[PIN CONTROL] ⚡ Setting GPIO{pin} to HIGH (ON)")
                 GPIO.output(pin, GPIO.HIGH)
             else:
+                logger.info(f"[PIN CONTROL] ⚫ Setting GPIO{pin} to LOW (OFF)")
                 GPIO.output(pin, GPIO.LOW)
             
             # If duration specified, schedule turn-off
             if duration and action == "on":
+                logger.info(f"[PIN CONTROL] ⏱️  GPIO{pin} will auto-turn off in {duration}s")
                 await asyncio.sleep(duration)
+                logger.info(f"[PIN CONTROL] ⚫ Auto-turning off GPIO{pin} after {duration}s")
                 GPIO.output(pin, GPIO.LOW)
-                logger.info(f"GPIO{pin} auto-turned off after {duration}s")
+                logger.info(f"[PIN CONTROL] ✓ GPIO{pin} auto-turned off successfully")
             
+            logger.info(f"[PIN CONTROL] ✅ PIN CONTROL SUCCESS: GPIO{pin} -> {action.upper()}")
             return {
                 "pin": pin,
+                "action": action,
+                "status": "success",
+                "duration": duration
+            }
+        except Exception as e:
+            logger.error(f"[PIN CONTROL] ❌ Pin control FAILED for GPIO{pin}: {e}", exc_info=True
                 "action": action,
                 "status": "success",
                 "duration": duration
@@ -429,17 +452,25 @@ class FirebaseDeviceListener:
             "unit": reading.get("unit"),
             "timestamp": datetime.now().isoformat()
         }
-    
-    async def _send_response(self, command_id: str, command_type: str, 
-                            status: str, data: Any = None):
-        """Send command response back to Firebase"""
-        try:
-            response = {
-                "command_id": command_id,
-                "command_type": command_type,
-                "status": status,
-                "data": data,
-                "timestamp": datetime.now().isoformat(),
+    logger.info(f"[RESPONSE] 📤 Sending response for command {command_id} (type: {command_type}, status: {status})")
+            logger.debug(f"[RESPONSE] Response payload: {response}")
+            
+            # Send response to config device ID (where webapp expects it)
+            logger.debug(f"[RESPONSE] Writing to: devices/{config.DEVICE_ID}/responses/{command_id}")
+            self.db.child(f"devices/{config.DEVICE_ID}/responses/{command_id}").set(response)
+            logger.info(f"[RESPONSE] ✅ Response written to config device ID path")
+            
+            # Also send to Firebase ID if different
+            if self.device_id != config.DEVICE_ID:
+                logger.debug(f"[RESPONSE] Writing to: devices/{self.device_id}/responses/{command_id}")
+                self.db.child(f"devices/{self.device_id}/responses/{command_id}").set(response)
+                logger.info(f"[RESPONSE] ✅ Response also written to Firebase ID path")
+            
+            logger.info(f"[RESPONSE] ✅ RESPONSE COMPLETE: {command_id} -> {status}")
+            
+        except Exception as e:
+            logger.error(f"[RESPONSE] ❌ Error sending response for {command_id}: {e}", exc_info=True)
+            logger.error(f"[RESPONSE] Response was: {response}"
                 "device_id": self.device_id,
                 "config_device_id": config.DEVICE_ID
             }

@@ -1,32 +1,14 @@
-"""Compatibility shim
+"""GPIO Actuator Controller - Controls GPIO pins via Firestore
 
-This module was moved to `src/services/gpio_actuator_controller.py` to
-consolidate all application modules under the `src/` package. Keep this
-shim for backward compatibility; please update imports to use
-`src.services.gpio_actuator_controller`.
+This module listens for GPIO state changes in Firestore and updates physical pins.
 """
 
 import logging
-import warnings
-
-# Re-export the moved implementations
-from src.services.gpio_actuator_controller import (
-    GPIOActuatorController,
-    get_gpio_controller,
-    init_gpio_controller,
-)
+from typing import Dict, Callable, Optional, Any
+from ..utils.gpio_import import GPIO, GPIO_AVAILABLE
+from .. import config
 
 logger = logging.getLogger(__name__)
-warnings.warn(
-    "Module `services.gpio_actuator_controller` moved to `src.services.gpio_actuator_controller`; please update imports.",
-    DeprecationWarning,
-)
-
-__all__ = [
-    "GPIOActuatorController",
-    "get_gpio_controller",
-    "init_gpio_controller",
-]
 
 
 class GPIOActuatorController:
@@ -34,12 +16,13 @@ class GPIOActuatorController:
     Controls GPIO pins based on Firestore gpioState updates.
     
     When the webapp toggles an actuator:
-    1. Webapp writes to Firestore: devices/{deviceId}/gpioState/{bcmPin}/state
+    1. Webapp writes to Firestore: devices/{hardwareSerial}/gpioState/{bcmPin}/state
     2. This controller receives the update in real-time
     3. Controller sets the physical GPIO pin HIGH or LOW
     """
     
-    def __init__(self, device_id: str = None):
+    def __init__(self, hardware_serial: str = None, device_id: str = None):
+        self.hardware_serial = hardware_serial or config.HARDWARE_SERIAL
         self.device_id = device_id or config.DEVICE_ID
         self.firestore_db = None
         self.listener = None
@@ -68,7 +51,7 @@ class GPIOActuatorController:
             # Start the real-time listener
             self._start_gpio_listener()
             
-            logger.info(f"GPIO Actuator Controller connected for device: {self.device_id}")
+            logger.info(f"GPIO Actuator Controller connected (hardware_serial: {self.hardware_serial}, device_id: {self.device_id})")
             return True
             
         except Exception as e:
@@ -76,10 +59,10 @@ class GPIOActuatorController:
             return False
     
     def _start_gpio_listener(self):
-        """Start listening to GPIO commands in Firestore"""
+        """Start listening to GPIO commands in Firestore using hardware_serial as primary key"""
         try:
-            # Listen to commands subcollection: devices/{DEVICE_ID}/commands/
-            commands_ref = self.firestore_db.collection('devices').document(self.device_id).collection('commands')
+            # Listen to commands subcollection: devices/{HARDWARE_SERIAL}/commands/
+            commands_ref = self.firestore_db.collection('devices').document(self.hardware_serial).collection('commands')
             
             def on_snapshot(doc_snapshot, changes, read_time):
                 """Callback when new commands arrive"""
@@ -94,7 +77,7 @@ class GPIOActuatorController:
             
             # Attach the listener
             self.listener = commands_ref.on_snapshot(on_snapshot)
-            logger.info("GPIO command listener started on devices/{}/commands/".format(self.device_id))
+            logger.info(f"GPIO command listener started on devices/{self.hardware_serial}/commands/")
             
         except Exception as e:
             logger.error(f"Failed to start GPIO listener: {e}")

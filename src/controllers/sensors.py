@@ -2,22 +2,33 @@
 
 import logging
 from datetime import datetime
-import adafruit_dht
-import board
-import RPi.GPIO as GPIO
-import config
+try:
+    import adafruit_dht
+    import board
+    DHT_AVAILABLE = True
+except ImportError:
+    DHT_AVAILABLE = False
+    adafruit_dht = None
+    board = None
 
 logger = logging.getLogger(__name__)
+if not DHT_AVAILABLE:
+    logger.warning("adafruit_dht not available - sensor readings will be simulated")
+
+from ..utils.gpio_import import GPIO
+from .. import config
 
 
 class SensorController:
     """Read sensors"""
     
     def __init__(self):
-        if not config.SIMULATE_HARDWARE:
+        if not config.SIMULATE_HARDWARE and DHT_AVAILABLE:
             self.dht_sensor = adafruit_dht.DHT22(getattr(board, f'D{config.SENSOR_DHT22_PIN}'))
             GPIO.setmode(GPIO.BCM)
             GPIO.setup(config.SENSOR_WATER_LEVEL_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        else:
+            self.dht_sensor = None
         
         logger.info("Sensor controller initialized")
     

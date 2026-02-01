@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime
 from ..controllers.sensors import SensorController
 from ..models import SensorReading, ThresholdAlert
-import config
+from .. import config
 
 logger = logging.getLogger(__name__)
 

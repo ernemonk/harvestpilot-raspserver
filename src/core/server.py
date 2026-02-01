@@ -9,7 +9,7 @@ from ..controllers.harvest import HarvestController
 from ..services import FirebaseService, SensorService, AutomationService, DatabaseService
 from ..services.diagnostics import DiagnosticsService
 from ..utils.gpio_manager import cleanup_gpio
-import config
+from .. import config
 
 # Import GPIO Actuator Controller for real-time Firestore control
 from ..services.gpio_actuator_controller import GPIOActuatorController
@@ -40,7 +40,11 @@ class RaspServer:
         self.automation = AutomationService(self.irrigation, self.lighting)
         
         # Initialize GPIO Actuator Controller for real-time Firestore control
-        self.gpio_actuator = GPIOActuatorController(device_id=config.DEVICE_ID)
+        # Use hardware_serial as primary identifier for secure device authentication
+        self.gpio_actuator = GPIOActuatorController(
+            hardware_serial=config.HARDWARE_SERIAL,
+            device_id=config.DEVICE_ID
+        )
         
         # In-memory sensor reading buffer (economical persistence strategy)
         self.sensor_buffer = {
@@ -55,7 +59,7 @@ class RaspServer:
         self._register_command_handlers()
         
         self.running = False
-        logger.info("RaspServer initialized successfully")
+        logger.info(f"RaspServer initialized successfully (hardware_serial: {config.HARDWARE_SERIAL}, device_id: {config.DEVICE_ID})")
     
     def _register_command_handlers(self):
         """Register all command handlers with Firebase service"""

@@ -19,18 +19,6 @@ warnings.warn(
 sys.path.insert(0, str(Path(__file__).parent / "src" / "admin"))
 exec(open(Path(__file__).parent / "src" / "admin" / "clear_devices.py").read())
 
-# Decode the base64 key
-key_b64_path = Path(__file__).parent.parent / "Codes" / "firebase-key-b64.txt"
-with open(key_b64_path, encoding='utf-8-sig') as f:
-    key_text = f.read().strip()
-    key_json = base64.b64decode(key_text).decode('utf-8')
-
-# Initialize Firebase
-cred = firebase_admin.credentials.Certificate(json.loads(key_json))
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://harvest-hub.firebaseio.com'
-})
-
 # Delete devices
 ref = db.reference('/devices')
 print("Deleting /devices...")

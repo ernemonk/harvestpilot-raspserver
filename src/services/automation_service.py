@@ -3,7 +3,7 @@
 import logging
 import asyncio
 from datetime import datetime
-import config
+from .. import config
 
 logger = logging.getLogger(__name__)
 

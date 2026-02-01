@@ -2,7 +2,7 @@
 
 This module remains for backward compatibility. Prefer the implementation
 in `src/services/firebase_service.py` which is the canonical Firebase
-abstraction used by the server.
+abstraction used by the server and uses Firestore exclusively.
 """
 import warnings
 warnings.warn("firebase_client.py is deprecated; use src.services.firebase_service", DeprecationWarning)
@@ -12,17 +12,16 @@ import logging
 import asyncio
 from datetime import datetime
 import firebase_admin
-from firebase_admin import credentials, db, firestore
+from firebase_admin import credentials, firestore
 import config
 
 logger = logging.getLogger(__name__)
 
 
 class FirebaseClient:
-    """Firebase Realtime Database and Firestore client for RaspServer"""
+    """Firebase Firestore client for RaspServer"""
     
     def __init__(self):
-        self.db = None
         self.firestore_db = None
         self.connected = False
         self.device_id = config.DEVICE_ID

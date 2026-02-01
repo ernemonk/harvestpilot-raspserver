@@ -1,24 +1,13 @@
-"""Configuration for HarvestPilot RaspServer"""
+"""DEPRECATED: Configuration moved to src/config.py
 
-import os
-from pathlib import Path
+This shim maintains backward compatibility. Import from src instead.
+"""
+import warnings
+warnings.warn("config module moved to src.config; import from there instead", DeprecationWarning, stacklevel=2)
 
-# Base directory
-BASE_DIR = Path(__file__).parent.resolve()
+# Re-export everything from src.config
+from src.config import *  # noqa: F401, F403
 
-# Hardware Platform
-HARDWARE_PLATFORM = os.getenv("HARDWARE_PLATFORM", "raspberry_pi")
-SIMULATE_HARDWARE = os.getenv("SIMULATE_HARDWARE", "false").lower() == "true"
-
-# Firebase Configuration
-DEVICE_ID = os.getenv("DEVICE_ID", "raspserver-001")
-
-# Default to absolute path on Pi, but allow environment override
-_default_creds = "/home/monkphx/harvestpilot-raspserver/firebase-key.json"
-FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", _default_creds)
-
-FIREBASE_DATABASE_URL = os.getenv("FIREBASE_DATABASE_URL", "https://harvest-hub.firebaseio.com")
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "harvest-hub")
 
 # GPIO Pin Configuration
 SENSOR_DHT22_PIN = 4

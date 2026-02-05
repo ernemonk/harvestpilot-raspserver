@@ -36,7 +36,10 @@ class RaspServer:
         
         # Initialize services (high-level logic)
         self.firebase = FirebaseService()
-        self.sensors = SensorService()
+        self.sensors = SensorService(
+            firestore_db=None,  # Will get Firestore after Firebase init
+            hardware_serial=config.HARDWARE_SERIAL
+        )
         self.automation = AutomationService(self.irrigation, self.lighting)
         
         # Initialize GPIO Actuator Controller for real-time Firestore control
@@ -77,6 +80,19 @@ class RaspServer:
             
             # Connect to Firebase
             self.firebase.connect()
+            
+            # After Firebase connects, pass Firestore DB to sensor service
+            # This allows sensors to read their config from device document
+            try:
+                from firebase_admin import firestore
+                firestore_db = firestore.client()
+                self.sensors = SensorService(
+                    firestore_db=firestore_db,
+                    hardware_serial=config.HARDWARE_SERIAL
+                )
+                logger.info("Sensor service updated with Firestore DB for device config")
+            except Exception as e:
+                logger.warning(f"Could not update sensor service with Firestore: {e}")
             
             # Connect GPIO Actuator Controller (real-time Firestore listener)
             self.gpio_actuator.connect()

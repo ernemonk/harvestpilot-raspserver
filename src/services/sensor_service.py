@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 class SensorService:
     """Manages sensor reading and threshold checking"""
     
-    def __init__(self):
-        self.controller = SensorController()
+    def __init__(self, firestore_db=None, hardware_serial=None):
+        self.controller = SensorController(firestore_db=firestore_db, hardware_serial=hardware_serial)
         logger.info("Sensor service initialized")
     
     async def read_all(self) -> SensorReading:

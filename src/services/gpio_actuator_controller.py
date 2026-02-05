@@ -5,6 +5,8 @@ This module listens for GPIO state changes in Firestore and updates physical pin
 
 import logging
 from typing import Dict, Callable, Optional, Any
+import firebase_admin
+from firebase_admin import firestore
 from ..utils.gpio_import import GPIO, GPIO_AVAILABLE
 from .. import config
 

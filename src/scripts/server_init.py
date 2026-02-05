@@ -133,18 +133,21 @@ class PiInitializer:
             return False
     
     def register_in_firestore(self) -> bool:
-        """Register Pi in Firestore using config device ID as document ID"""
+        """Register Pi in Firestore using hardware_serial as document ID (fallback to device_id)"""
         try:
             if not self.firestore:
                 logger.error("❌ Firestore not initialized")
                 return False
             
-            # Create device document using config device ID as Firestore document ID
+            # Use hardware_serial as primary key, fallback to config_device_id
+            doc_id = self.pi_serial if self.pi_serial else self.config_device_id
+            
+            # Create device document
             device_data = {
-                # Identifiers - use config_device_id as primary
+                # Identifiers
+                "hardware_serial": self.pi_serial or self.config_device_id,
                 "deviceId": self.config_device_id,
                 "deviceName": self.config_device_id,
-                "hardware_serial": self.pi_serial,
                 "mac_address": self.pi_mac,
                 "hostname": self.pi_hostname,
                 "ip_address": self.get_ip_address(),
@@ -161,18 +164,45 @@ class PiInitializer:
                 
                 # Device mapping
                 "mapping": {
-                    "hardware_serial": self.pi_serial,
+                    "hardware_serial": self.pi_serial or self.config_device_id,
                     "config_id": self.config_device_id,
                     "mac": self.pi_mac,
                     "hostname": self.pi_hostname,
+                },
+                
+                # Default GPIO configuration (can be overridden via Firestore)
+                "gpioState": {
+                    "17": {
+                        "function": "light",
+                        "mode": "output",
+                        "state": False,
+                        "lastUpdated": int(datetime.now().timestamp() * 1000)
+                    },
+                    "18": {
+                        "function": "pump",
+                        "mode": "output",
+                        "state": False,
+                        "lastUpdated": int(datetime.now().timestamp() * 1000)
+                    },
+                    "dht22": {
+                        "function": "temperature_humidity",
+                        "mode": "input",
+                        "pin": 4
+                    },
+                    "water_level": {
+                        "function": "water_level",
+                        "mode": "input",
+                        "pin": 23
+                    }
                 }
             }
             
-            # Write to Firestore using config device ID
-            # Path: devices/{config_device_id}
-            self.firestore.collection('devices').document(self.config_device_id).set(device_data)
+            # Write to Firestore using hardware_serial (or fallback to config_device_id)
+            self.firestore.collection('devices').document(doc_id).set(device_data, merge=True)
             
-            logger.info(f"✅ Registered in Firestore: devices/{self.config_device_id}")
+            logger.info(f"✅ Registered in Firestore: devices/{doc_id}")
+            logger.info(f"   Hardware Serial: {device_data['hardware_serial']}")
+            logger.info(f"   Device ID: {self.config_device_id}")
             return True
             
         except Exception as e:
@@ -217,9 +247,10 @@ class PiInitializer:
             self.pi_hostname = self.get_hostname()
             self.config_device_id = self.get_config_device_id()
             
+            # Use hardware_serial if found, otherwise fallback to config device_id
             if self.pi_serial == "unknown":
-                logger.error("❌ Could not determine Pi serial - aborting")
-                return False
+                logger.warning("⚠️  Could not determine Pi serial - will use config DEVICE_ID as fallback")
+                self.pi_serial = None  # Let registration code handle the fallback
             
             # 2. Initialize Firebase
             logger.info("\n🔐 Initializing Firebase...")
@@ -241,7 +272,7 @@ class PiInitializer:
             logger.info("\n" + "=" * 80)
             logger.info("✅ INITIALIZATION COMPLETE")
             logger.info("=" * 80)
-            logger.info(f"   Pi Serial:      {self.pi_serial}")
+            logger.info(f"   Pi Serial:      {self.pi_serial or 'fallback (using config DEVICE_ID)'}")
             logger.info(f"   MAC Address:    {self.pi_mac}")
             logger.info(f"   Hostname:       {self.pi_hostname}")
             logger.info(f"   Config Device:  {self.config_device_id}")

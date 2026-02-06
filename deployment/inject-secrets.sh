@@ -6,17 +6,28 @@
 set -euo pipefail
 
 REPO_PATH="${1:-.}"
-LOG_FILE="${LOG_FILE:-/var/log/harvestpilot-secrets-inject.log}"
+LOG_FILE="${LOG_FILE:-}"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+# Determine log file location - use repo local if /var/log not writable
+if [ -z "$LOG_FILE" ]; then
+    # Try system log first
+    if touch /var/log/harvestpilot-secrets-inject.log 2>/dev/null; then
+        LOG_FILE="/var/log/harvestpilot-secrets-inject.log"
+    else
+        # Fall back to local repo log
+        LOG_FILE="$REPO_PATH/.secrets-inject.log"
+    fi
+fi
+
+# Create log directory if needed
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 # Color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
-
-# Create log directory if needed
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 log_message() {
     local level=$1
@@ -30,7 +41,9 @@ log_message() {
         WARN)    color=$YELLOW ;;
     esac
     
-    echo -e "${color}[$TIMESTAMP] [$level] $msg${NC}" | tee -a "$LOG_FILE"
+    echo -e "${color}[$TIMESTAMP] [$level] $msg${NC}"
+    # Try to write to log file, but don't fail if we can't
+    echo "[$TIMESTAMP] [$level] $msg" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 # Verify environment variables are set

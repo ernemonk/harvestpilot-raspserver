@@ -176,6 +176,7 @@ class FirebaseService:
         """Publish periodic heartbeat to Firestore to show device is alive"""
         try:
             if not self.connected:
+                logger.warning("Cannot publish heartbeat - Firebase not connected")
                 return
             
             self.firestore_db.collection("devices").document(
@@ -187,9 +188,9 @@ class FirebaseService:
                 "lastHeartbeat": SERVER_TIMESTAMP,
                 "lastSyncAt": SERVER_TIMESTAMP,
             }, merge=True)
-            logger.debug(f"Heartbeat published")
+            logger.info(f"✓ Heartbeat published to Firestore (serial: {self.hardware_serial})")
         except Exception as e:
-            logger.error(f"Failed to publish heartbeat: {e}")
+            logger.error(f"✗ Failed to publish heartbeat: {e}", exc_info=True)
     
     def register_command_handler(self, cmd_type: str, action: str, callback):
         """Register handler for command type/action"""

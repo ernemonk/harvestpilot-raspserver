@@ -286,25 +286,35 @@ class RaspServer:
     
     async def _heartbeat_loop(self):
         """Send periodic heartbeat to Firebase to keep device online (every 30 seconds)"""
-        logger.info("Starting heartbeat loop (30-second interval)")
+        logger.info("🎯 Starting heartbeat loop (30-second interval)")
+        heartbeat_count = 0
         
         while self.running:
             try:
                 await asyncio.sleep(30)  # Send heartbeat every 30 seconds
                 
                 # Publish heartbeat to Firebase (keeps device status as "online")
-                self.firebase.publish_heartbeat()
-                self.diagnostics.record_heartbeat()
-                logger.debug("Heartbeat published to Firebase")
+                try:
+                    self.firebase.publish_heartbeat()
+                    heartbeat_count += 1
+                    self.diagnostics.record_heartbeat()
+                    logger.info(f"💓 Heartbeat #{heartbeat_count} sent successfully")
+                except Exception as hb_error:
+                    logger.error(f"💔 Heartbeat failed: {hb_error}", exc_info=True)
+                    self.diagnostics.record_error('firebase')
                 
+            except asyncio.CancelledError:
+                logger.info("Heartbeat loop cancelled")
+                break
             except Exception as e:
-                logger.error(f"Error in heartbeat loop: {e}")
+                logger.error(f"❌ Error in heartbeat loop: {e}", exc_info=True)
                 self.diagnostics.record_error('firebase')
                 await asyncio.sleep(5)
     
     async def _metrics_loop(self):
         """Publish diagnostic metrics to Firebase (every 5 minutes)"""
-        logger.info("Starting metrics loop (5-minute interval)")
+        logger.info("📊 Starting metrics loop (5-minute health check interval)")
+        metrics_count = 0
         
         while self.running:
             try:
@@ -312,13 +322,26 @@ class RaspServer:
                 
                 # Get health summary and publish to Firebase
                 health_summary = self.diagnostics.get_compact_summary()
-                self.firebase.publish_status_update({
-                    "diagnostics": health_summary
-                })
+                try:
+                    self.firebase.publish_status_update({
+                        "diagnostics": health_summary
+                    })
+                    metrics_count += 1
+                    logger.info(f"📈 Health check #{metrics_count} published - Status: {health_summary['status']}, "
+                               f"Uptime: {health_summary['uptime_seconds']}s, "
+                               f"Errors: {health_summary['total_errors']}")
+                except Exception as metric_error:
+                    logger.error(f"Failed to publish metrics: {metric_error}", exc_info=True)
                 
                 # Log summary to journal
                 self.diagnostics.log_summary()
                 
+            except asyncio.CancelledError:
+                logger.info("Metrics loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in metrics loop: {e}", exc_info=True)
+                await asyncio.sleep(30)
             except Exception as e:
                 logger.error(f"Error in metrics loop: {e}")
                 self.diagnostics.record_error('firebase')

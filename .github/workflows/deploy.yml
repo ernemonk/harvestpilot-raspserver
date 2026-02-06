@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔧 Setting up GPIO configuration..."
-          bash scripts/setup-gpio-automated.sh
+          bash src/scripts/setup-gpio-automated.sh
 
       - name: Initialize Pi and register to Firestore
         shell: bash
@@ -46,10 +46,10 @@ jobs:
           echo "📝 Initializing Pi and registering to Firestore..."
           
           # Make sure init script is executable
-          chmod +x scripts/server_init.py
+          chmod +x src/scripts/server_init.py
           
           # Run initialization (this will also be called by systemd on service start)
-          python3 scripts/server_init.py || {
+          python3 src/scripts/server_init.py || {
             echo "⚠️  Init script failed, but service will attempt to start"
             # Don't exit here - allow service to start even if registration fails
           }

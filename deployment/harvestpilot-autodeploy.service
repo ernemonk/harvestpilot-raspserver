@@ -1,0 +1,16 @@
+[Unit]
+Description=HarvestPilot Auto-Deploy Service
+Documentation=file:///home/monkphx/harvestpilot-raspserver/docs/PI_DEPLOYMENT_AND_VERIFICATION.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=monkphx
+WorkingDirectory=/home/monkphx/harvestpilot-raspserver
+ExecStart=/bin/bash /home/monkphx/harvestpilot-raspserver/deployment/auto-deploy.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

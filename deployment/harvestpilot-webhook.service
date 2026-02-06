@@ -1,0 +1,27 @@
+[Unit]
+Description=HarvestPilot GitHub Webhook Receiver
+Documentation=file:///home/monkphx/harvestpilot-raspserver/docs/PI_DEPLOYMENT_AND_VERIFICATION.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=monkphx
+WorkingDirectory=/home/monkphx/harvestpilot-raspserver/deployment
+ExecStart=/usr/bin/python3 /home/monkphx/harvestpilot-raspserver/deployment/github-webhook-receiver.py
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+
+# Environment variables
+Environment="GITHUB_WEBHOOK_SECRET=your-webhook-secret-here"
+Environment="DEPLOY_TOKEN=your-deploy-token-here"
+
+# Standard output/error
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=harvestpilot-webhook
+
+[Install]
+WantedBy=multi-user.target

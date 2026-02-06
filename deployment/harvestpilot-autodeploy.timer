@@ -1,0 +1,18 @@
+[Unit]
+Description=HarvestPilot Auto-Deploy Timer
+Documentation=file:///home/monkphx/harvestpilot-raspserver/docs/PI_DEPLOYMENT_AND_VERIFICATION.md
+Requires=harvestpilot-autodeploy.service
+
+[Timer]
+# Run every 5 minutes
+OnBootSec=30sec
+OnUnitActiveSec=5min
+
+# Randomize start time by up to 30 seconds to avoid thundering herd
+RandomizedDelaySec=30
+
+# Run immediately if system was down during scheduled time
+Persistent=true
+
+[Install]
+WantedBy=timers.target

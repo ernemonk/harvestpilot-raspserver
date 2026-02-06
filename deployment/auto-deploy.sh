@@ -1,6 +1,6 @@
 #!/bin/bash
 # Auto-deploy script for HarvestPilot RaspServer
-# Pulls latest code and restarts service
+# Pulls latest code, injects secrets, and restarts service
 # Usage: This script is run by systemd service and cron job
 
 set -e
@@ -8,6 +8,7 @@ set -e
 REPO_PATH="/home/monkphx/harvestpilot-raspserver"
 LOG_FILE="/var/log/harvestpilot-autodeploy.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+SECRETS_SCRIPT="$REPO_PATH/deployment/inject-secrets.sh"
 
 # Create log directory if needed
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
@@ -38,6 +39,19 @@ log_message "⬇️  Pulling changes from origin/main..."
 git pull origin main 2>&1 | tee -a "$LOG_FILE"
 
 log_message "✓ Code updated successfully"
+
+# Inject secrets from environment variables
+log_message "🔐 Injecting secrets into deployment..."
+if [ -f "$SECRETS_SCRIPT" ]; then
+    if bash "$SECRETS_SCRIPT" "$REPO_PATH" 2>&1 | tee -a "$LOG_FILE"; then
+        log_message "✓ Secrets injected successfully"
+    else
+        log_message "⚠️  Warning: Some secrets may not have been properly injected"
+        # Continue deployment anyway (secrets might be cached)
+    fi
+else
+    log_message "⚠️  Warning: Secrets injection script not found at $SECRETS_SCRIPT"
+fi
 
 # Restart service
 log_message "♻️  Restarting harvestpilot-raspserver service..."

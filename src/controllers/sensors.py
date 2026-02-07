@@ -29,13 +29,10 @@ class SensorController:
         self.hardware_serial = hardware_serial or config.HARDWARE_SERIAL
         self.configured_sensors = {}  # Cache of sensors from device doc
         self.dht_sensor = None
+        self._sensors_initialized = False
         
-        if not config.SIMULATE_HARDWARE and DHT_AVAILABLE:
-            self.dht_sensor = adafruit_dht.DHT22(getattr(board, f'D{config.SENSOR_DHT22_PIN}'))
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(config.SENSOR_WATER_LEVEL_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        else:
-            self.dht_sensor = None
+        # Note: DHT22 and GPIO pins are initialized on first sensor read
+        # after configuration is loaded from Firestore. No hardcoded pins.
     
     def _get_configured_sensors(self):
         """Fetch input sensors from device document's gpioState in Firestore
@@ -86,11 +83,53 @@ class SensorController:
             return {}
         logger.info("Sensor controller initialized")
     
+    def _initialize_sensor_hardware(self):
+        """Initialize GPIO pins and sensor hardware based on Firestore config
+        
+        Called once after sensors are loaded from Firestore.
+        Sets up DHT22, GPIO input/output pins, etc based on gpioState.
+        """
+        if self._sensors_initialized or config.SIMULATE_HARDWARE:
+            return
+            
+        try:
+            logger.info("🔧 Initializing sensor hardware based on Firestore configuration...")
+            GPIO.setmode(GPIO.BCM)
+            
+            # Initialize each configured sensor's GPIO
+            for sensor_name, sensor_config in self.configured_sensors.items():
+                pin = sensor_config.get('pin')
+                if not pin:
+                    continue
+                    
+                if sensor_name == 'temperature_humidity' and DHT_AVAILABLE:
+                    try:
+                        self.dht_sensor = adafruit_dht.DHT22(getattr(board, f'D{pin}'))
+                        logger.info(f"   ✅ DHT22 initialized on GPIO {pin}")
+                    except Exception as e:
+                        logger.error(f"   ❌ Failed to initialize DHT22 on GPIO {pin}: {e}")
+                        self.dht_sensor = None
+                        
+                elif sensor_name == 'water_level':
+                    try:
+                        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                        logger.info(f"   ✅ Water level sensor initialized on GPIO {pin}")
+                    except Exception as e:
+                        logger.error(f"   ❌ Failed to setup water level on GPIO {pin}: {e}")
+            
+            self._sensors_initialized = True
+            logger.info("✅ Sensor hardware initialization complete")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize sensor hardware: {e}")
+    
     async def read_all(self):
         """Read sensors configured in device document"""
         # Load configured sensors on first read
         if not self.configured_sensors:
             self.configured_sensors = self._get_configured_sensors()
+            # Initialize hardware after loading config from Firestore
+            self._initialize_sensor_hardware()
         
         if config.SIMULATE_HARDWARE:
             return self._simulate_sensors()

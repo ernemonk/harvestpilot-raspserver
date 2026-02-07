@@ -88,9 +88,19 @@ inject_firebase_credentials() {
     local firebase_path="$REPO_PATH/firebase-key.json"
     
     # Write Firebase credentials securely
+    # GitHub Actions stores secrets as base64-encoded to preserve formatting
+    # We need to decode it before writing
     {
         set +x  # Don't echo credentials
-        printf '%s' "$FIREBASE_KEY_JSON" > "$firebase_path"
+        # Check if it looks like base64 (try to decode)
+        if printf '%s' "$FIREBASE_KEY_JSON" | base64 -d > "$firebase_path" 2>/dev/null; then
+            # Successfully decoded - file is already valid
+            log_message "DEBUG" "Firebase credentials decoded from base64"
+        else
+            # Not base64 encoded, write as-is
+            printf '%s' "$FIREBASE_KEY_JSON" > "$firebase_path"
+            log_message "DEBUG" "Firebase credentials written as plain JSON"
+        fi
     } 2>/dev/null
     
     # Verify it's valid JSON

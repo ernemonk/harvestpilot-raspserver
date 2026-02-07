@@ -11,9 +11,9 @@ from enum import Enum
 # SYSTEM CONSTANTS (mirrored from schema.ts)
 # =============================================================================
 
-SYNC_INTERVAL_MS = 60 * 60 * 1000  # 1 hour
+SYNC_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes (economical batch sync)
 SENSOR_POLL_INTERVAL_MS = 60 * 1000  # 60 seconds
-HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000  # 5 minutes
+HEARTBEAT_INTERVAL_MS = 30 * 1000  # 30 seconds (keep-alive)
 COMMAND_POLL_INTERVAL_MS = 30 * 1000  # 30 seconds
 
 FAILSAFE_WATER_LEVEL_PERCENT = 20

@@ -62,6 +62,20 @@ class FirebaseService:
             logger.error(f"Failed to connect to Firebase: {e}", exc_info=True)
             raise
     
+    def reconnect(self):
+        """Reconnect to Firebase if connection lost"""
+        try:
+            logger.info("Reconnecting to Firebase...")
+            self.connected = False
+            self.firestore_db = firestore.client()
+            self.connected = True
+            logger.info("Firebase reconnection successful")
+            self.set_device_online()
+        except Exception as e:
+            logger.error(f"Firebase reconnection failed: {e}", exc_info=True)
+            self.connected = False
+            raise
+    
     def disconnect(self):
         """Disconnect from Firebase"""
         if self.connected:
@@ -177,7 +191,13 @@ class FirebaseService:
         try:
             if not self.connected:
                 logger.warning("Cannot publish heartbeat - Firebase not connected")
-                return
+                # Attempt to reconnect
+                logger.info("Attempting to reconnect to Firebase...")
+                try:
+                    self.reconnect()
+                except Exception as reconnect_error:
+                    logger.error(f"Reconnection failed: {reconnect_error}")
+                    return
             
             self.firestore_db.collection("devices").document(
                 self.hardware_serial
@@ -191,6 +211,9 @@ class FirebaseService:
             logger.info(f"✓ Heartbeat published to Firestore (serial: {self.hardware_serial})")
         except Exception as e:
             logger.error(f"✗ Failed to publish heartbeat: {e}", exc_info=True)
+            # Mark connection as invalid so next heartbeat will attempt reconnect
+            self.connected = False
+            logger.warning("Firebase connection marked as invalid - will reconnect on next heartbeat")
     
     def register_command_handler(self, cmd_type: str, action: str, callback):
         """Register handler for command type/action"""

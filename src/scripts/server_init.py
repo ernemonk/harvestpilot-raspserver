@@ -170,39 +170,25 @@ class PiInitializer:
                     "hostname": self.pi_hostname,
                 },
                 
-                # Default GPIO configuration (can be overridden via Firestore)
-                "gpioState": {
-                    "17": {
-                        "function": "light",
-                        "mode": "output",
-                        "state": False,
-                        "lastUpdated": int(datetime.now().timestamp() * 1000)
-                    },
-                    "18": {
-                        "function": "pump",
-                        "mode": "output",
-                        "state": False,
-                        "lastUpdated": int(datetime.now().timestamp() * 1000)
-                    },
-                    "dht22": {
-                        "function": "temperature_humidity",
-                        "mode": "input",
-                        "pin": 4
-                    },
-                    "water_level": {
-                        "function": "water_level",
-                        "mode": "input",
-                        "pin": 23
-                    }
-                }
+                # GPIO configuration MUST be configured in web app
+                # This is now the ONLY source of truth for all GPIO pins and sensors
+                # User configures everything (inputs, outputs, sensors) via web app
+                "gpioState": {}
             }
             
             # Write to Firestore using hardware_serial (or fallback to config_device_id)
             self.firestore.collection('devices').document(doc_id).set(device_data, merge=True)
             
-            logger.info(f"✅ Registered in Firestore: devices/{doc_id}")
+            logger.info(f"✅ Registered device in Firestore: devices/{doc_id}")
             logger.info(f"   Hardware Serial: {device_data['hardware_serial']}")
             logger.info(f"   Device ID: {self.config_device_id}")
+            logger.info("")
+            logger.info("📋 NEXT STEPS:")
+            logger.info("   1. Open HarvestPilot web app")
+            logger.info("   2. Navigate to Device Configuration")
+            logger.info(f"   3. Configure GPIO pins and sensors for {self.config_device_id}")
+            logger.info("   4. Restart this service after configuration")
+            logger.info("")
             return True
             
         except Exception as e:

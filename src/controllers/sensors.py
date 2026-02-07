@@ -38,16 +38,23 @@ class SensorController:
             self.dht_sensor = None
     
     def _get_configured_sensors(self):
-        """Fetch input sensors from device document's gpioState"""
+        """Fetch input sensors from device document's gpioState in Firestore
+        
+        Sensors are configured exclusively via web app in Firestore.
+        No hardcoded pins or fallbacks - all configuration from database.
+        """
         try:
             if not self.firestore_db:
-                logger.warning("No Firestore DB - using default sensors")
-                return self._get_default_sensors()
+                logger.error("❌ CRITICAL: Firestore DB not available - cannot load sensor configuration")
+                logger.error("   Sensor configuration MUST be set up in Firestore via web app")
+                logger.error("   Path: devices/{device_id}/gpioState/")
+                return {}
             
             device_doc = self.firestore_db.collection('devices').document(self.hardware_serial).get()
             if not device_doc.exists:
-                logger.warning(f"Device {self.hardware_serial} not in Firestore - using defaults")
-                return self._get_default_sensors()
+                logger.error(f"❌ CRITICAL: Device {self.hardware_serial} not found in Firestore")
+                logger.error("   Please register device in web app before starting service")
+                return {}
             
             device_data = device_doc.to_dict()
             gpio_state = device_data.get('gpioState', {})
@@ -63,23 +70,20 @@ class SensorController:
                     }
             
             if sensors:
-                logger.info(f"Loaded configured sensors from device doc: {list(sensors.keys())}")
+                logger.info(f"✅ Loaded sensor configuration from Firestore: {list(sensors.keys())}")
+                for name, cfg in sensors.items():
+                    logger.info(f"   - {name}: GPIO {cfg.get('pin')}")
                 return sensors
             else:
-                logger.info("No input sensors in gpioState - using defaults")
-                return self._get_default_sensors()
+                logger.warning("⚠️  No input sensors configured in Firestore gpioState")
+                logger.warning("   Path: devices/{device_id}/gpioState/")
+                logger.warning("   Add sensors via web app to enable sensor readings")
+                return {}
                 
         except Exception as e:
-            logger.error(f"Failed to get configured sensors: {e}")
-            return self._get_default_sensors()
-    
-    def _get_default_sensors(self):
-        """Fallback default sensors"""
-        return {
-            'temperature_humidity': {'pin': config.SENSOR_DHT22_PIN, 'function': 'temperature_humidity'},
-            'water_level': {'pin': config.SENSOR_WATER_LEVEL_PIN, 'function': 'water_level'}
-        }
-        
+            logger.error(f"❌ Failed to load sensor configuration from Firestore: {e}")
+            logger.error("   Check Firestore database connection and permissions")
+            return {}
         logger.info("Sensor controller initialized")
     
     async def read_all(self):

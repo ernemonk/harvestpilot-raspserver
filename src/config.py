@@ -77,11 +77,10 @@ FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", _default_cred
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "harvest-hub")
 
-# GPIO Pin Configuration
-SENSOR_DHT22_PIN = 4
-SENSOR_SOIL_MOISTURE_PIN = 17  # Via external ADC
-SENSOR_WATER_LEVEL_PIN = 27
-SENSOR_FLOW_METER_PIN = 22
+# GPIO Pin Configuration: MUST be configured in Firestore per device
+# All sensor pins are now defined exclusively in the web app's Firestore database
+# under devices/{hardware_serial}/gpioState/
+# NO HARDCODED PINS - configuration comes from Firestore only
 
 PUMP_PWM_PIN = 17  # GPIO 17 (Physical Pin 11) - Pump MOSFET
 PUMP_RELAY_PIN = 19

@@ -2,6 +2,7 @@
 
 import logging
 import random
+import asyncio
 from datetime import datetime
 try:
     import adafruit_dht
@@ -99,8 +100,9 @@ class SensorController:
             for sensor_name, sensor_config in self.configured_sensors.items():
                 if sensor_name == 'temperature_humidity' and self.dht_sensor is not None:
                     try:
-                        temp_c = self.dht_sensor.temperature
-                        humidity = self.dht_sensor.humidity
+                        # Run blocking DHT sensor read in thread executor
+                        temp_c = await asyncio.to_thread(lambda: self.dht_sensor.temperature)
+                        humidity = await asyncio.to_thread(lambda: self.dht_sensor.humidity)
                         temp_f = (temp_c * 9/5) + 32
                         reading['temperature'] = round(temp_f, 1)
                         reading['humidity'] = round(humidity, 1)

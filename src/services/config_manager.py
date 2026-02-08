@@ -19,10 +19,6 @@ class ConfigManager:
     # Default intervals (seconds) - used if Firestore config unavailable
     DEFAULT_INTERVALS = {
         "heartbeat_interval_s": 30,
-        "metrics_interval_s": 300,
-        "sync_interval_s": 1800,
-        "aggregation_interval_s": 60,
-        "sensor_read_interval_s": 5,
     }
 
     # Min/max bounds to prevent invalid configurations

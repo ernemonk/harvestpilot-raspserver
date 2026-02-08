@@ -44,9 +44,12 @@ class RaspServer:
         self.automation = AutomationService(self.irrigation, self.lighting)
         
         # Initialize configuration manager (dynamic intervals)
+        # Create LocalDatabase instance for ConfigManager persistence
+        from ..storage.local_db import LocalDatabase
+        local_db = LocalDatabase()
         self.config_manager = ConfigManager(
             hardware_serial=config.HARDWARE_SERIAL,
-            database=self.database.db  # Pass LocalDatabase instance
+            database=local_db  # Pass LocalDatabase instance
         )
         
         # Initialize GPIO Actuator Controller for real-time Firestore control

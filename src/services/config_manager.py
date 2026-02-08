@@ -96,12 +96,22 @@ class ConfigManager:
                 if not config_doc.exists:
                     # Create intervals doc with defaults
                     logger.info(f"Creating /config/intervals with defaults: {self.DEFAULT_INTERVALS}")
-                    config_doc_ref.set(self.DEFAULT_INTERVALS)
-                    self.intervals = self.DEFAULT_INTERVALS.copy()
-                    await self._cache_locally(self.intervals)
-                    logger.info(f"Created /config/intervals in Firestore: {self.intervals}")
-                    self._loading = False
-                    return
+                    try:
+                        config_doc_ref.set(self.DEFAULT_INTERVALS)
+                        logger.info(f"✓ Created /config/intervals in Firestore: {self.intervals}")
+                        
+                        # Verify it was actually created
+                        verify_doc = config_doc_ref.get()
+                        if verify_doc.exists:
+                            logger.info(f"✓ Verified /config/intervals exists in Firestore")
+                            self.intervals = self.DEFAULT_INTERVALS.copy()
+                            await self._cache_locally(self.intervals)
+                            self._loading = False
+                            return
+                        else:
+                            logger.error(f"✗ Failed to create /config/intervals - document doesn't exist after set()")
+                    except Exception as e:
+                        logger.error(f"✗ Error creating /config/intervals: {e}", exc_info=True)
                 else:
                     # Document exists - clean up old fields and ensure only current ones exist
                     existing_config = config_doc.to_dict()

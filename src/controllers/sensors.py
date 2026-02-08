@@ -146,9 +146,13 @@ class SensorController:
                         # Run blocking DHT sensor read in thread executor
                         temp_c = await asyncio.to_thread(lambda: self.dht_sensor.temperature)
                         humidity = await asyncio.to_thread(lambda: self.dht_sensor.humidity)
-                        temp_f = (temp_c * 9/5) + 32
-                        reading['temperature'] = round(temp_f, 1)
-                        reading['humidity'] = round(humidity, 1)
+                        # Handle None values from DHT sensor (intermittent failures)
+                        if temp_c is not None and humidity is not None:
+                            temp_f = (temp_c * 9/5) + 32
+                            reading['temperature'] = round(temp_f, 1)
+                            reading['humidity'] = round(humidity, 1)
+                        else:
+                            logger.warning(f"DHT22 returned None values - temperature: {temp_c}, humidity: {humidity}")
                     except Exception as e:
                         logger.error(f"Failed to read DHT22: {e}")
                         
@@ -190,22 +194,27 @@ class SensorController:
         """Check sensor thresholds"""
         alerts = []
         
-        if reading['temperature'] < config.TEMP_MIN:
-            alerts.append({
-                "type": "temperature_low",
-                "value": reading['temperature'],
-                "threshold": config.TEMP_MIN,
-                "severity": "warning"
-            })
-        elif reading['temperature'] > config.TEMP_MAX:
-            alerts.append({
-                "type": "temperature_high",
-                "value": reading['temperature'],
-                "threshold": config.TEMP_MAX,
-                "severity": "warning"
-            })
+        # Safely check temperature thresholds with None handling
+        temp = reading.get('temperature')
+        if temp is not None:
+            if temp < config.TEMP_MIN:
+                alerts.append({
+                    "type": "temperature_low",
+                    "value": temp,
+                    "threshold": config.TEMP_MIN,
+                    "severity": "warning"
+                })
+            elif temp > config.TEMP_MAX:
+                alerts.append({
+                    "type": "temperature_high",
+                    "value": temp,
+                    "threshold": config.TEMP_MAX,
+                    "severity": "warning"
+                })
         
-        if not reading['water_level']:
+        # Safely check water level with None handling
+        water_level = reading.get('water_level')
+        if water_level is not None and not water_level:
             alerts.append({
                 "type": "water_level_low",
                 "severity": "critical"

@@ -253,33 +253,54 @@ class RaspServer:
                 if self.sensor_buffer['temperature']:
                     window_end = datetime.now()
                     
-                    # Calculate aggregates
+                    # Helper to filter out None values for aggregation
+                    def safe_aggregate(values):
+                        """Filter None values and return stats"""
+                        clean_values = [v for v in values if v is not None]
+                        if not clean_values:
+                            return {'avg': None, 'min': None, 'max': None, 'last': None, 'count': 0}
+                        return {
+                            'avg': sum(clean_values) / len(clean_values),
+                            'min': min(clean_values),
+                            'max': max(clean_values),
+                            'last': clean_values[-1],
+                            'count': len(clean_values)
+                        }
+                    
+                    # Calculate aggregates with None handling
+                    temp_agg = safe_aggregate(self.sensor_buffer['temperature'])
+                    humidity_agg = safe_aggregate(self.sensor_buffer['humidity'])
+                    soil_moisture_agg = safe_aggregate(self.sensor_buffer['soil_moisture'])
+                    
                     aggregation = {
                         'window_start': self.buffer_window_start.isoformat(),
                         'window_end': window_end.isoformat(),
-                        'temperature_avg': sum(self.sensor_buffer['temperature']) / len(self.sensor_buffer['temperature']),
-                        'temperature_min': min(self.sensor_buffer['temperature']),
-                        'temperature_max': max(self.sensor_buffer['temperature']),
-                        'temperature_last': self.sensor_buffer['temperature'][-1],
-                        'temperature_count': len(self.sensor_buffer['temperature']),
-                        'humidity_avg': sum(self.sensor_buffer['humidity']) / len(self.sensor_buffer['humidity']),
-                        'humidity_min': min(self.sensor_buffer['humidity']),
-                        'humidity_max': max(self.sensor_buffer['humidity']),
-                        'humidity_last': self.sensor_buffer['humidity'][-1],
-                        'humidity_count': len(self.sensor_buffer['humidity']),
-                        'soil_moisture_avg': sum(self.sensor_buffer['soil_moisture']) / len(self.sensor_buffer['soil_moisture']),
-                        'soil_moisture_min': min(self.sensor_buffer['soil_moisture']),
-                        'soil_moisture_max': max(self.sensor_buffer['soil_moisture']),
-                        'soil_moisture_last': self.sensor_buffer['soil_moisture'][-1],
-                        'soil_moisture_count': len(self.sensor_buffer['soil_moisture']),
+                        'temperature_avg': temp_agg['avg'],
+                        'temperature_min': temp_agg['min'],
+                        'temperature_max': temp_agg['max'],
+                        'temperature_last': temp_agg['last'],
+                        'temperature_count': temp_agg['count'],
+                        'humidity_avg': humidity_agg['avg'],
+                        'humidity_min': humidity_agg['min'],
+                        'humidity_max': humidity_agg['max'],
+                        'humidity_last': humidity_agg['last'],
+                        'humidity_count': humidity_agg['count'],
+                        'soil_moisture_avg': soil_moisture_agg['avg'],
+                        'soil_moisture_min': soil_moisture_agg['min'],
+                        'soil_moisture_max': soil_moisture_agg['max'],
+                        'soil_moisture_last': soil_moisture_agg['last'],
+                        'soil_moisture_count': soil_moisture_agg['count'],
                         'water_level_last': self.sensor_buffer['water_level'] if self.sensor_buffer['water_level'] is not None else False
                     }
                     
                     # Save aggregated data (non-blocking)
                     await self.database.async_save_sensor_aggregated(aggregation)
                     
-                    logger.info(f"Aggregated 60-second window: temp={aggregation['temperature_avg']:.1f}°C, "
-                               f"humidity={aggregation['humidity_avg']:.1f}%, "
+                    # Log with None-safe formatting
+                    temp_str = f"{aggregation['temperature_avg']:.1f}°C" if aggregation['temperature_avg'] is not None else "N/A"
+                    humidity_str = f"{aggregation['humidity_avg']:.1f}%" if aggregation['humidity_avg'] is not None else "N/A"
+                    logger.info(f"Aggregated 60-second window: temp={temp_str}, "
+                               f"humidity={humidity_str}, "
                                f"readings={aggregation['temperature_count']}")
                     
                     # Reset buffer for next window

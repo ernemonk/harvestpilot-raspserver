@@ -116,7 +116,6 @@ class RaspServer:
             
             tasks = [
                 self._heartbeat_loop(),         # Keep-alive signal to Firebase every 30s
-                self._metrics_loop(),           # Publish metrics every 5 minutes
             ]
             
             if config.AUTO_IRRIGATION_ENABLED or config.AUTO_LIGHTING_ENABLED:
@@ -139,9 +138,6 @@ class RaspServer:
         self.config_manager.stop_listening()
         
         try:
-            # Sync remaining data to cloud before shutdown
-            await self._sync_remaining_data()
-            
             # Stop all hardware
             await self.irrigation.stop()
             await self.lighting.turn_off()
@@ -206,118 +202,6 @@ class RaspServer:
                 self.diagnostics.record_error('firebase')
                 await asyncio.sleep(5)
     
-    async def _metrics_loop(self):
-        """Publish diagnostic metrics to Firebase (dynamic interval from ConfigManager)"""
-        logger.info("📊 Starting metrics loop")
-        metrics_count = 0
-        
-        while self.running:
-            try:
-                interval = self.config_manager.get_metrics_interval()
-                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
-                
-                # Get health summary and publish to Firebase
-                health_summary = self.diagnostics.get_compact_summary()
-                try:
-                    self.firebase.publish_status_update({
-                        "diagnostics": health_summary
-                    })
-                    metrics_count += 1
-                    logger.info(f"📈 Health check #{metrics_count} published - Status: {health_summary['status']}, "
-                               f"Uptime: {health_summary['uptime_seconds']}s, "
-                               f"Errors: {health_summary['total_errors']}")
-                except Exception as metric_error:
-                    logger.error(f"Failed to publish metrics: {metric_error}", exc_info=True)
-                
-                # Log summary to journal
-                self.diagnostics.log_summary()
-                
-            except asyncio.CancelledError:
-                logger.info("Metrics loop cancelled")
-                break
-            except Exception as e:
-                logger.error(f"❌ Error in metrics loop: {e}", exc_info=True)
-                await asyncio.sleep(30)
-            except Exception as e:
-                logger.error(f"Error in metrics loop: {e}")
-                self.diagnostics.record_error('firebase')
-                await asyncio.sleep(10)
-    
-    async def _sync_remaining_data(self):
-        """Sync all unsynced data to cloud (non-blocking)"""
-        try:
-            # Sync aggregated sensor readings (primary data source)
-            unsynced_agg = self.database.get_unsynced_aggregated_readings(limit=1000)
-            for agg_dict in unsynced_agg:
-                try:
-                    # Publish aggregated data to Firebase
-                    self.firebase.publish_status_update({
-                        "aggregated_reading": {
-                            "window_start": agg_dict['window_start'],
-                            "window_end": agg_dict['window_end'],
-                            "temperature_avg": agg_dict['temperature_avg'],
-                            "humidity_avg": agg_dict['humidity_avg'],
-                            "soil_moisture_avg": agg_dict['soil_moisture_avg'],
-                            "water_level": agg_dict['water_level_last']
-                        }
-                    })
-                    await self.database.async_mark_aggregated_reading_synced(agg_dict['id'])
-                except Exception as e:
-                    logger.error(f"Error syncing aggregated reading: {e}")
-            
-            # Sync raw readings (threshold events)
-            unsynced_raw = self.database.get_unsynced_raw_readings(limit=500)
-            for raw_dict in unsynced_raw:
-                try:
-                    self.firebase.publish_status_update({
-                        "raw_reading": {
-                            "timestamp": raw_dict['timestamp'],
-                            "temperature": raw_dict['temperature'],
-                            "reason": raw_dict['reason']
-                        }
-                    })
-                    await self.database.async_mark_raw_reading_synced(raw_dict['id'])
-                except Exception as e:
-                    logger.error(f"Error syncing raw reading: {e}")
-            
-            # Sync legacy readings (for backwards compatibility if any)
-            unsynced_readings = self.database.get_unsynced_readings(limit=100)
-            for reading_dict in unsynced_readings:
-                try:
-                    from ..models import SensorReading
-                    reading = SensorReading(
-                        timestamp=reading_dict['timestamp'],
-                        temperature=reading_dict['temperature'],
-                        humidity=reading_dict['humidity'],
-                        soil_moisture=reading_dict['soil_moisture'],
-                        water_level=reading_dict['water_level']
-                    )
-                    self.firebase.publish_sensor_data(reading)
-                    await self.database.async_mark_reading_synced(reading_dict['id'])
-                except Exception as e:
-                    logger.error(f"Error syncing legacy reading: {e}")
-            
-            # Sync alerts
-            unsynced_alerts = self.database.get_unsynced_alerts(limit=200)
-            for alert_dict in unsynced_alerts:
-                try:
-                    self.firebase.publish_status_update({"alert": alert_dict})
-                    await self.database.async_mark_alert_synced(alert_dict['id'])
-                except Exception as e:
-                    logger.error(f"Error syncing alert: {e}")
-            
-            # Cleanup old data (keep 7 days)
-            self.database.cleanup_old_data(days=7)
-            
-            # Log sync status
-            stats = self.database.get_database_size()
-            logger.info(f"Sync complete. DB: {stats.get('aggregated')} agg, "
-                       f"{stats.get('raw')} raw, {stats.get('alerts')} alerts, "
-                       f"{stats.get('file_size_mb')}MB")
-            
-        except Exception as e:
-            logger.error(f"Error syncing data: {e}")
-    
     async def _emergency_stop(self):
         """Stop all operations immediately"""
         logger.warning("EMERGENCY STOP ACTIVATED")
@@ -343,8 +227,6 @@ class RaspServer:
             duration = params.get("duration", config.IRRIGATION_CYCLE_DURATION)
             speed = params.get("speed", config.PUMP_DEFAULT_SPEED)
             
-            asyncio.create_task(self.irrigation.start(duration=duration, speed=speed))
-            
             # Log operation locally (non-blocking)
             asyncio.create_task(self.database.async_log_operation(
                 device_type="irrigation",
@@ -352,10 +234,6 @@ class RaspServer:
                 params={"duration": duration, "speed": speed},
                 status="started"
             ))
-            
-            self.firebase.publish_status_update({
-                "irrigation": {"status": "running", "speed": speed}
-            })
             
             logger.info(f"Irrigation started: duration={duration}s, speed={speed}%")
         except Exception as e:
@@ -372,10 +250,6 @@ class RaspServer:
                 action="stop",
                 status="stopped"
             ))
-            
-            self.firebase.publish_status_update({
-                "irrigation": {"status": "stopped"}
-            })
             
             logger.info("Irrigation stopped")
         except Exception as e:
@@ -396,10 +270,6 @@ class RaspServer:
                 status="on"
             ))
             
-            self.firebase.publish_status_update({
-                "lighting": {"status": "on", "intensity": intensity}
-            })
-            
             logger.info(f"Lighting ON: intensity={intensity}%")
         except Exception as e:
             logger.error(f"Error turning on lighting: {e}")
@@ -415,10 +285,6 @@ class RaspServer:
                 action="off",
                 status="off"
             ))
-            
-            self.firebase.publish_status_update({
-                "lighting": {"status": "off"}
-            })
             
             logger.info("Lighting OFF")
         except Exception as e:
@@ -440,10 +306,6 @@ class RaspServer:
                 status="harvesting"
             ))
             
-            self.firebase.publish_status_update({
-                f"harvest_tray_{tray_id}": {"status": "harvesting", "speed": speed}
-            })
-            
             logger.info(f"Harvest started: tray={tray_id}, speed={speed}%")
         except Exception as e:
             logger.error(f"Error starting harvest: {e}")
@@ -462,10 +324,6 @@ class RaspServer:
                 params={"tray_id": tray_id},
                 status="stopped"
             ))
-            
-            self.firebase.publish_status_update({
-                f"harvest_tray_{tray_id}": {"status": "stopped"}
-            })
             
             logger.info(f"Harvest stopped: tray={tray_id}")
         except Exception as e:

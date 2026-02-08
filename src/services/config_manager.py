@@ -228,8 +228,17 @@ class ConfigManager:
     def stop_listening(self):
         """Stop listening to Firestore changes."""
         if self._listener_handle:
-            self._listener_handle()
-            self._listener_handle = None
+            try:
+                # Firestore listener returns a Watch object with .unsubscribe() method
+                if hasattr(self._listener_handle, 'unsubscribe'):
+                    self._listener_handle.unsubscribe()
+                else:
+                    # If it's callable (older API), call it directly
+                    self._listener_handle()
+            except Exception as e:
+                logger.warning(f"Error stopping Firestore listener: {e}")
+            finally:
+                self._listener_handle = None
             logger.info("Firestore listener stopped")
 
     # Interval accessor methods

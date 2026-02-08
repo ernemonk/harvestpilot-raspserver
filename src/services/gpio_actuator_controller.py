@@ -104,33 +104,55 @@ class GPIOActuatorController:
     def _start_gpio_state_listener(self):
         """Listen for GPIO state changes from Firestore (webapp toggling actuators)"""
         try:
-            # Listen to gpioState in device doc: devices/{HARDWARE_SERIAL}
+            # Listen to device doc: devices/{HARDWARE_SERIAL}
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
             
-            logger.info(f"✓ Setting up GPIO state listener on devices/{self.hardware_serial}/gpioState")
+            logger.info(f"✓ Setting up GPIO state listener on devices/{self.hardware_serial}")
             
             def on_state_snapshot(doc_snapshot, changes, read_time):
                 """Callback when GPIO state changes from Firestore"""
                 logger.debug(f"📡 GPIO state on_snapshot triggered")
                 
-                if doc_snapshot.exists:
-                    doc_data = doc_snapshot.to_dict()
-                    gpio_state = doc_data.get('gpioState', {})
-                    
-                    if gpio_state:
-                        logger.info(f"✓ GPIO state update received: {gpio_state}")
-                        
-                        for pin_str, pin_data in gpio_state.items():
-                            try:
-                                pin = int(pin_str)
-                                state = pin_data.get('state', False) if isinstance(pin_data, dict) else bool(pin_data)
+                try:
+                    if isinstance(doc_snapshot, list):
+                        # Collection listener returns list of docs
+                        for doc in doc_snapshot:
+                            if doc.exists:
+                                doc_data = doc.to_dict()
+                                gpio_state = doc_data.get('gpioState', {})
                                 
-                                logger.info(f"✓ GPIO state changed: pin={pin}, state={state} (from Firestore)")
-                                self._apply_state_change(pin, state)
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"✗ Invalid pin format {pin_str}: {e}")
+                                if gpio_state:
+                                    logger.info(f"✓ GPIO state update received: {gpio_state}")
+                                    
+                                    for pin_str, pin_data in gpio_state.items():
+                                        try:
+                                            pin = int(pin_str)
+                                            state = pin_data.get('state', False) if isinstance(pin_data, dict) else bool(pin_data)
+                                            
+                                            logger.info(f"✓ GPIO state changed: pin={pin}, state={state} (from Firestore)")
+                                            self._apply_state_change(pin, state)
+                                        except (ValueError, TypeError) as e:
+                                            logger.warning(f"✗ Invalid pin format {pin_str}: {e}")
                     else:
-                        logger.debug("No gpioState in device doc")
+                        # Document listener returns single snapshot
+                        if doc_snapshot.exists:
+                            doc_data = doc_snapshot.to_dict()
+                            gpio_state = doc_data.get('gpioState', {})
+                            
+                            if gpio_state:
+                                logger.info(f"✓ GPIO state update received: {gpio_state}")
+                                
+                                for pin_str, pin_data in gpio_state.items():
+                                    try:
+                                        pin = int(pin_str)
+                                        state = pin_data.get('state', False) if isinstance(pin_data, dict) else bool(pin_data)
+                                        
+                                        logger.info(f"✓ GPIO state changed: pin={pin}, state={state} (from Firestore)")
+                                        self._apply_state_change(pin, state)
+                                    except (ValueError, TypeError) as e:
+                                        logger.warning(f"✗ Invalid pin format {pin_str}: {e}")
+                except Exception as e:
+                    logger.error(f"✗ Error in GPIO state snapshot: {e}", exc_info=True)
             
             # Attach the listener
             self._gpio_state_listener = device_ref.on_snapshot(on_state_snapshot)

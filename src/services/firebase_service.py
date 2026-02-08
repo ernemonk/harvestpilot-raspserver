@@ -99,7 +99,6 @@ class FirebaseService:
                 "device_id": self.device_id,  # Store human-readable alias
                 "hardware_serial": self.hardware_serial,  # Primary identifier
                 "lastHeartbeat": SERVER_TIMESTAMP,
-                "lastSyncAt": SERVER_TIMESTAMP,
             }
             # Use hardware_serial as Firestore document key
             self.firestore_db.collection("devices").document(
@@ -206,7 +205,6 @@ class FirebaseService:
                 "device_id": self.device_id,
                 "hardware_serial": self.hardware_serial,
                 "lastHeartbeat": SERVER_TIMESTAMP,
-                "lastSyncAt": SERVER_TIMESTAMP,
             }, merge=True)
             logger.info(f"✓ Heartbeat published to Firestore (serial: {self.hardware_serial})")
         except Exception as e:

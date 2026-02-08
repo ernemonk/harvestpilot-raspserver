@@ -160,20 +160,6 @@ class RaspServer:
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
     
-    async def _sync_to_cloud_loop(self):
-        """Periodically sync local data to cloud (dynamic interval from ConfigManager)"""
-        logger.info("Starting cloud sync loop")
-        
-        while self.running:
-            try:
-                interval = self.config_manager.get_sync_interval()
-                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
-                await self._sync_remaining_data()
-                
-            except Exception as e:
-                logger.error(f"Error in sync loop: {e}")
-                await asyncio.sleep(60)
-    
     async def _heartbeat_loop(self):
         """Send periodic heartbeat to Firebase to keep device online (dynamic interval from ConfigManager)"""
         logger.info("🎯 Starting heartbeat loop")

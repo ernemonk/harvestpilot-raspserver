@@ -173,6 +173,16 @@ class LocalDatabase:
                 VALUES (1, 'on')
             """)
 
+            # Device configuration (intervals and settings)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS device_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    source TEXT,
+                    last_updated INTEGER
+                )
+            """)
+
     # =========================================================================
     # SENSOR READINGS
     # =========================================================================

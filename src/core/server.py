@@ -8,6 +8,7 @@ from ..controllers.lighting import LightingController
 from ..controllers.harvest import HarvestController
 from ..services import FirebaseService, SensorService, AutomationService, DatabaseService
 from ..services.diagnostics import DiagnosticsService
+from ..services.config_manager import ConfigManager
 from ..utils.gpio_manager import cleanup_gpio
 from .. import config
 
@@ -41,6 +42,12 @@ class RaspServer:
             hardware_serial=config.HARDWARE_SERIAL
         )
         self.automation = AutomationService(self.irrigation, self.lighting)
+        
+        # Initialize configuration manager (dynamic intervals)
+        self.config_manager = ConfigManager(
+            hardware_serial=config.HARDWARE_SERIAL,
+            database=self.database.db  # Pass LocalDatabase instance
+        )
         
         # Initialize GPIO Actuator Controller for real-time Firestore control
         # Use hardware_serial as primary identifier for secure device authentication
@@ -81,8 +88,9 @@ class RaspServer:
             # Connect to Firebase
             self.firebase.connect()
             
-            # After Firebase connects, pass Firestore DB to sensor service
+            # After Firebase connects, pass Firestore DB to sensor service and config manager
             # This allows sensors to read their config from device document
+            # and config_manager to listen for interval changes
             try:
                 from firebase_admin import firestore
                 firestore_db = firestore.client()
@@ -90,9 +98,17 @@ class RaspServer:
                     firestore_db=firestore_db,
                     hardware_serial=config.HARDWARE_SERIAL
                 )
-                logger.info("Sensor service updated with Firestore DB for device config")
+                self.config_manager.set_firestore_client(firestore_db)
+                logger.info("Sensor service and ConfigManager updated with Firestore DB")
             except Exception as e:
-                logger.warning(f"Could not update sensor service with Firestore: {e}")
+                logger.warning(f"Could not update services with Firestore: {e}")
+            
+            # Initialize configuration (load intervals from Firestore/cache/defaults)
+            await self.config_manager.initialize()
+            logger.info(f"Configuration loaded: {self.config_manager.get_all_intervals()}")
+            
+            # Start listening for configuration changes
+            self.config_manager.listen_for_changes()
             
             # Connect GPIO Actuator Controller (real-time Firestore listener)
             self.gpio_actuator.connect()
@@ -128,6 +144,9 @@ class RaspServer:
         
         self.running = False
         
+        # Stop listening for config changes
+        self.config_manager.stop_listening()
+        
         try:
             # Sync remaining data to cloud before shutdown
             await self._sync_remaining_data()
@@ -155,7 +174,7 @@ class RaspServer:
             logger.error(f"Error during shutdown: {e}")
     
     async def _sensor_reading_loop(self):
-        """Continuously read sensors and publish to Firebase (with in-memory buffering)"""
+        """Continuously read sensors and publish to Firebase (with in-memory buffering, dynamic interval)"""
         logger.info("Starting sensor reading loop...")
         
         while self.running:
@@ -193,7 +212,8 @@ class RaspServer:
                             logger.warning("Critical alert - emergency stop")
                             await self._emergency_stop()
                 
-                await asyncio.sleep(config.SENSOR_READING_INTERVAL)
+                interval = self.config_manager.get_sensor_read_interval()
+                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
                 
             except Exception as e:
                 logger.error(f"Error in sensor loop: {e}")
@@ -218,12 +238,13 @@ class RaspServer:
             logger.error(f"Failed to publish alert: {e}")
     
     async def _aggregation_loop(self):
-        """Aggregate buffered sensor data every 60 seconds and persist"""
-        logger.info("Starting sensor aggregation loop (60-second windows)")
+        """Aggregate buffered sensor data and persist (dynamic interval from ConfigManager)"""
+        logger.info("Starting sensor aggregation loop")
         
         while self.running:
             try:
-                await asyncio.sleep(60)  # Aggregate every 60 seconds
+                interval = self.config_manager.get_aggregation_interval()
+                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
                 
                 # Only aggregate if buffer has data
                 if self.sensor_buffer['temperature']:
@@ -272,12 +293,13 @@ class RaspServer:
                 await asyncio.sleep(5)
     
     async def _sync_to_cloud_loop(self):
-        """Periodically sync local data to cloud (every 30 minutes)"""
-        logger.info("Starting cloud sync loop (30-minute interval)")
+        """Periodically sync local data to cloud (dynamic interval from ConfigManager)"""
+        logger.info("Starting cloud sync loop")
         
         while self.running:
             try:
-                await asyncio.sleep(1800)  # Sync every 30 minutes (economical interval)
+                interval = self.config_manager.get_sync_interval()
+                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
                 await self._sync_remaining_data()
                 
             except Exception as e:
@@ -285,13 +307,14 @@ class RaspServer:
                 await asyncio.sleep(60)
     
     async def _heartbeat_loop(self):
-        """Send periodic heartbeat to Firebase to keep device online (every 30 seconds)"""
-        logger.info("🎯 Starting heartbeat loop (30-second interval)")
+        """Send periodic heartbeat to Firebase to keep device online (dynamic interval from ConfigManager)"""
+        logger.info("🎯 Starting heartbeat loop")
         heartbeat_count = 0
         
         while self.running:
             try:
-                await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+                interval = self.config_manager.get_heartbeat_interval()
+                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
                 
                 # Publish heartbeat to Firebase (keeps device status as "online")
                 try:
@@ -312,13 +335,14 @@ class RaspServer:
                 await asyncio.sleep(5)
     
     async def _metrics_loop(self):
-        """Publish diagnostic metrics to Firebase (every 5 minutes)"""
-        logger.info("📊 Starting metrics loop (5-minute health check interval)")
+        """Publish diagnostic metrics to Firebase (dynamic interval from ConfigManager)"""
+        logger.info("📊 Starting metrics loop")
         metrics_count = 0
         
         while self.running:
             try:
-                await asyncio.sleep(300)  # Publish metrics every 5 minutes
+                interval = self.config_manager.get_metrics_interval()
+                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
                 
                 # Get health summary and publish to Firebase
                 health_summary = self.diagnostics.get_compact_summary()

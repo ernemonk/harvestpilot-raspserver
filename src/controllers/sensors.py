@@ -131,6 +131,17 @@ class SensorController:
             # Initialize hardware after loading config from Firestore
             self._initialize_sensor_hardware()
         
+        # If no sensors configured and not simulating, return empty reading (skip sensor loop iteration)
+        if not self.configured_sensors and not config.SIMULATE_HARDWARE:
+            return {
+                "timestamp": datetime.utcnow().isoformat(),
+                "temperature": None,
+                "humidity": None,
+                "soil_moisture": None,
+                "water_level": None,
+                "no_sensors_configured": True
+            }
+        
         if config.SIMULATE_HARDWARE:
             return self._simulate_sensors()
         

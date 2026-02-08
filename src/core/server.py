@@ -184,6 +184,12 @@ class RaspServer:
             try:
                 # Read sensors
                 reading = await self.sensors.read_all()
+                
+                # Skip if no sensors configured (readings will be all None)
+                if reading.get('no_sensors_configured'):
+                    await asyncio.sleep(30)  # Check less frequently if no sensors configured
+                    continue
+                
                 self.diagnostics.record_sensor_read()
                 
                 # Buffer reading in-memory (NOT writing to disk every 5 seconds)

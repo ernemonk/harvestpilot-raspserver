@@ -194,7 +194,7 @@ class ConfigManager:
         return None
 
     async def _cache_locally(self, config: Dict[str, float]):
-        """Cache configuration in local SQLite database."""
+        """Cache configuration in local SQLite database (async version)."""
         try:
             with self.database._get_connection() as conn:
                 cursor = conn.cursor()
@@ -206,9 +206,26 @@ class ConfigManager:
                         """,
                         (key, str(value), "firestore"),
                     )
-            logger.debug(f"Cached config locally: {config}")
+            logger.debug(f"✓ Cached config locally: {config}")
         except Exception as e:
-            logger.error(f"Failed to cache config locally: {e}")
+            logger.error(f"✗ Failed to cache config locally: {e}")
+
+    def _update_local_cache_sync(self, config: Dict[str, float]):
+        """Cache configuration in local SQLite database (sync version for listener context)."""
+        try:
+            with self.database._get_connection() as conn:
+                cursor = conn.cursor()
+                for key, value in config.items():
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO device_config 
+                        (key, value, source) VALUES (?, ?, ?)
+                        """,
+                        (key, str(value), "firestore"),
+                    )
+            logger.info(f"✓ Synced config to local cache: {config}")
+        except Exception as e:
+            logger.error(f"✗ Failed to sync config to local cache: {e}")
 
     def _validate_config(self, config: Dict[str, float]) -> Optional[Dict[str, float]]:
         """
@@ -257,29 +274,67 @@ class ConfigManager:
                 .collection("config")
                 .document("intervals")
             )
+            
+            logger.info(f"✓ Setting up Firestore listener on {self.hardware_serial}/config/intervals")
 
             def on_snapshot(doc_snapshot, changes, read_time):
                 """Called when Firestore config changes."""
-                if doc_snapshot:
-                    for doc in doc_snapshot:
-                        if doc.exists:
-                            new_config = doc.to_dict()
+                logger.debug(f"📡 on_snapshot triggered - doc_snapshot type: {type(doc_snapshot)}, changes: {changes}")
+                
+                try:
+                    # Handle both single doc and query snapshot
+                    if hasattr(doc_snapshot, 'exists'):
+                        # Single document snapshot
+                        logger.debug(f"Single doc snapshot - exists: {doc_snapshot.exists}")
+                        if doc_snapshot.exists:
+                            new_config = doc_snapshot.to_dict()
+                            logger.info(f"✓ Config change detected in Firestore: {new_config}")
+                            
                             validated = self._validate_config(new_config)
                             if validated:
                                 old_intervals = self.intervals.copy()
                                 self.intervals = validated
-                                asyncio.create_task(
-                                    self._cache_locally(self.intervals)
-                                )
                                 logger.info(
-                                    f"Config updated from Firestore: "
-                                    f"{old_intervals} → {self.intervals}"
+                                    f"✓ Config UPDATED: {old_intervals} → {self.intervals}"
                                 )
+                                # Cache synchronously in listener context
+                                import asyncio
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(self._cache_locally(self.intervals))
+                                    else:
+                                        # Run sync version if no loop
+                                        self._update_local_cache_sync(self.intervals)
+                                except RuntimeError:
+                                    # No event loop, use sync cache
+                                    self._update_local_cache_sync(self.intervals)
+                            else:
+                                logger.warning(f"✗ Config validation failed: {new_config}")
+                        else:
+                            logger.warning("✗ Config document doesn't exist")
+                    else:
+                        # Query snapshot (shouldn't happen for single doc)
+                        logger.debug(f"Query snapshot - {len(doc_snapshot)} docs")
+                        if len(doc_snapshot) > 0:
+                            doc = doc_snapshot[0]
+                            if doc.exists:
+                                new_config = doc.to_dict()
+                                logger.info(f"✓ Config change detected: {new_config}")
+                                validated = self._validate_config(new_config)
+                                if validated:
+                                    old_intervals = self.intervals.copy()
+                                    self.intervals = validated
+                                    logger.info(
+                                        f"✓ Config UPDATED: {old_intervals} → {self.intervals}"
+                                    )
+                except Exception as e:
+                    logger.error(f"✗ Error in on_snapshot callback: {e}", exc_info=True)
 
             self._listener_handle = config_ref.on_snapshot(on_snapshot)
-            logger.info("Firestore listener initialized for config changes")
+            logger.info("✓ Firestore listener initialized and ACTIVE for config changes")
         except Exception as e:
-            logger.error(f"Failed to set up Firestore listener: {e}")
+            logger.error(f"✗ Failed to set up Firestore listener: {e}", exc_info=True)
 
     def stop_listening(self):
         """Stop listening to Firestore changes."""
@@ -299,8 +354,10 @@ class ConfigManager:
 
     # Interval accessor methods
     def get_heartbeat_interval(self) -> float:
-        """Get heartbeat interval in seconds."""
-        return self.intervals.get("heartbeat_interval_s", self.DEFAULT_INTERVALS["heartbeat_interval_s"])
+        """Get heartbeat interval in seconds - reads current value from self.intervals."""
+        interval = self.intervals.get("heartbeat_interval_s", self.DEFAULT_INTERVALS["heartbeat_interval_s"])
+        logger.debug(f"📍 Heartbeat interval = {interval}s (from config: {self.intervals})")
+        return interval
 
     def get_metrics_interval(self) -> float:
         """Get metrics interval in seconds."""

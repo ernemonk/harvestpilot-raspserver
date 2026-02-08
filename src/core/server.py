@@ -59,15 +59,6 @@ class RaspServer:
             device_id=config.DEVICE_ID
         )
         
-        # In-memory sensor reading buffer (economical persistence strategy)
-        self.sensor_buffer = {
-            'temperature': [],
-            'humidity': [],
-            'soil_moisture': [],
-            'water_level': None
-        }
-        self.buffer_window_start = datetime.now()
-        
         # Register command handlers
         self._register_command_handlers()
         
@@ -124,9 +115,6 @@ class RaspServer:
             self.running = True
             
             tasks = [
-                self._sensor_reading_loop(),
-                self._aggregation_loop(),        # New: aggregate buffered data every 60s
-                self._sync_to_cloud_loop(),     # Sync aggregated data every 30+ min
                 self._heartbeat_loop(),         # Keep-alive signal to Firebase every 30s
                 self._metrics_loop(),           # Publish metrics every 5 minutes
             ]
@@ -175,152 +163,6 @@ class RaspServer:
             logger.info("RaspServer stopped successfully")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
-    
-    async def _sensor_reading_loop(self):
-        """Continuously read sensors and publish to Firebase (with in-memory buffering, dynamic interval)"""
-        logger.info("Starting sensor reading loop...")
-        
-        while self.running:
-            try:
-                # Read sensors
-                reading = await self.sensors.read_all()
-                
-                # Skip if no sensors configured (readings will be all None)
-                if reading.get('no_sensors_configured'):
-                    await asyncio.sleep(30)  # Check less frequently if no sensors configured
-                    continue
-                
-                self.diagnostics.record_sensor_read()
-                
-                # Buffer reading in-memory (NOT writing to disk every 5 seconds)
-                self.sensor_buffer['temperature'].append(reading.temperature)
-                self.sensor_buffer['humidity'].append(reading.humidity)
-                self.sensor_buffer['soil_moisture'].append(reading.soil_moisture)
-                self.sensor_buffer['water_level'] = reading.water_level
-                
-                # Publish to Firebase (async, non-blocking)
-                asyncio.create_task(self._publish_sensor_async(reading))
-                
-                # Check thresholds
-                alerts = await self.sensors.check_thresholds(reading)
-                if alerts:
-                    for alert in alerts:
-                        self.diagnostics.record_alert()
-                        
-                        # Save raw reading when threshold crossed (immediate, no buffer)
-                        await self.database.async_save_sensor_raw(reading, reason="threshold_crossed")
-                        
-                        # Store alert locally - non-blocking
-                        await self.database.async_save_alert(alert.to_dict())
-                        
-                        # Publish to Firebase
-                        asyncio.create_task(self._publish_alert_async(alert))
-                        
-                        # Emergency stop on critical alert
-                        if alert.severity == 'critical' and config.EMERGENCY_STOP_ON_WATER_LOW:
-                            logger.warning("Critical alert - emergency stop")
-                            await self._emergency_stop()
-                
-                interval = self.config_manager.get_sensor_read_interval()
-                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
-                
-            except Exception as e:
-                logger.error(f"Error in sensor loop: {e}")
-                self.diagnostics.record_error('sensor')
-                await asyncio.sleep(5)
-    
-    async def _publish_sensor_async(self, reading):
-        """Publish sensor data to Firebase asynchronously"""
-        try:
-            self.firebase.publish_sensor_data(reading)
-        except Exception as e:
-            logger.error(f"Failed to publish sensor data: {e}")
-            self.diagnostics.record_error('firebase')
-    
-    async def _publish_alert_async(self, alert):
-        """Publish alert to Firebase asynchronously"""
-        try:
-            self.firebase.publish_status_update({
-                "lastAlert": alert.to_dict()
-            })
-        except Exception as e:
-            logger.error(f"Failed to publish alert: {e}")
-    
-    async def _aggregation_loop(self):
-        """Aggregate buffered sensor data and persist (dynamic interval from ConfigManager)"""
-        logger.info("Starting sensor aggregation loop")
-        
-        while self.running:
-            try:
-                interval = self.config_manager.get_aggregation_interval()
-                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
-                
-                # Only aggregate if buffer has data
-                if self.sensor_buffer['temperature']:
-                    window_end = datetime.now()
-                    
-                    # Helper to filter out None values for aggregation
-                    def safe_aggregate(values):
-                        """Filter None values and return stats"""
-                        clean_values = [v for v in values if v is not None]
-                        if not clean_values:
-                            return {'avg': None, 'min': None, 'max': None, 'last': None, 'count': 0}
-                        return {
-                            'avg': sum(clean_values) / len(clean_values),
-                            'min': min(clean_values),
-                            'max': max(clean_values),
-                            'last': clean_values[-1],
-                            'count': len(clean_values)
-                        }
-                    
-                    # Calculate aggregates with None handling
-                    temp_agg = safe_aggregate(self.sensor_buffer['temperature'])
-                    humidity_agg = safe_aggregate(self.sensor_buffer['humidity'])
-                    soil_moisture_agg = safe_aggregate(self.sensor_buffer['soil_moisture'])
-                    
-                    aggregation = {
-                        'window_start': self.buffer_window_start.isoformat(),
-                        'window_end': window_end.isoformat(),
-                        'temperature_avg': temp_agg['avg'],
-                        'temperature_min': temp_agg['min'],
-                        'temperature_max': temp_agg['max'],
-                        'temperature_last': temp_agg['last'],
-                        'temperature_count': temp_agg['count'],
-                        'humidity_avg': humidity_agg['avg'],
-                        'humidity_min': humidity_agg['min'],
-                        'humidity_max': humidity_agg['max'],
-                        'humidity_last': humidity_agg['last'],
-                        'humidity_count': humidity_agg['count'],
-                        'soil_moisture_avg': soil_moisture_agg['avg'],
-                        'soil_moisture_min': soil_moisture_agg['min'],
-                        'soil_moisture_max': soil_moisture_agg['max'],
-                        'soil_moisture_last': soil_moisture_agg['last'],
-                        'soil_moisture_count': soil_moisture_agg['count'],
-                        'water_level_last': self.sensor_buffer['water_level'] if self.sensor_buffer['water_level'] is not None else False
-                    }
-                    
-                    # Save aggregated data (non-blocking)
-                    await self.database.async_save_sensor_aggregated(aggregation)
-                    
-                    # Log with None-safe formatting
-                    temp_str = f"{aggregation['temperature_avg']:.1f}°C" if aggregation['temperature_avg'] is not None else "N/A"
-                    humidity_str = f"{aggregation['humidity_avg']:.1f}%" if aggregation['humidity_avg'] is not None else "N/A"
-                    logger.info(f"Aggregated 60-second window: temp={temp_str}, "
-                               f"humidity={humidity_str}, "
-                               f"readings={aggregation['temperature_count']}")
-                    
-                    # Reset buffer for next window
-                    self.sensor_buffer = {
-                        'temperature': [],
-                        'humidity': [],
-                        'soil_moisture': [],
-                        'water_level': None
-                    }
-                    self.buffer_window_start = datetime.now()
-                
-            except Exception as e:
-                logger.error(f"Error in aggregation loop: {e}")
-                await asyncio.sleep(5)
     
     async def _sync_to_cloud_loop(self):
         """Periodically sync local data to cloud (dynamic interval from ConfigManager)"""

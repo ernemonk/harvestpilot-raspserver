@@ -131,8 +131,9 @@ class SensorController:
             # Initialize hardware after loading config from Firestore
             self._initialize_sensor_hardware()
         
-        # If no sensors configured and not simulating, return empty reading (skip sensor loop iteration)
-        if not self.configured_sensors and not config.SIMULATE_HARDWARE:
+        # Only return configured sensors
+        if not self.configured_sensors:
+            # No sensors configured - return None values (this should trigger skipping in server loop)
             return {
                 "timestamp": datetime.utcnow().isoformat(),
                 "temperature": None,
@@ -141,9 +142,6 @@ class SensorController:
                 "water_level": None,
                 "no_sensors_configured": True
             }
-        
-        if config.SIMULATE_HARDWARE:
-            return self._simulate_sensors()
         
         try:
             reading = {

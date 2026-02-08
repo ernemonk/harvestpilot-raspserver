@@ -7,6 +7,7 @@ import asyncio
 import logging
 from typing import Optional, Dict
 from google.cloud.firestore import Client as FirestoreClient
+from google.cloud import firestore
 from src.storage.local_db import LocalDatabase
 
 logger = logging.getLogger(__name__)
@@ -83,10 +84,20 @@ class ConfigManager:
                 else:
                     # Document doesn't exist - create it with defaults
                     try:
-                        config_doc = (
+                        # First ensure parent device doc exists
+                        device_doc = (
                             self.firestore_db.collection("devices")
                             .document(self.hardware_serial)
-                            .collection("config")
+                        )
+                        device_doc.update({
+                            "config_initialized_at": firestore.datetime.datetime.utcnow(),
+                            "config_status": "initializing"
+                        })
+                        logger.info(f"Updated device doc {self.hardware_serial} for config initialization")
+                        
+                        # Now create the config/intervals subcollection document
+                        config_doc = (
+                            device_doc.collection("config")
                             .document("intervals")
                         )
                         config_doc.set(self.DEFAULT_INTERVALS)

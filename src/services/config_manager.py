@@ -62,6 +62,7 @@ class ConfigManager:
         """
         Initialize configuration on startup.
         Load from Firestore, fallback to local cache, then defaults.
+        Creates /config/intervals in Firestore if it doesn't exist.
         """
         if self._loading:
             return
@@ -79,6 +80,27 @@ class ConfigManager:
                     )
                     self._loading = False
                     return
+                else:
+                    # Document doesn't exist - create it with defaults
+                    try:
+                        config_doc = (
+                            self.firestore_db.collection("devices")
+                            .document(self.hardware_serial)
+                            .collection("config")
+                            .document("intervals")
+                        )
+                        config_doc.set(self.DEFAULT_INTERVALS)
+                        logger.info(
+                            f"Created /config/intervals in Firestore with defaults: {self.DEFAULT_INTERVALS}"
+                        )
+                        self.intervals = self.DEFAULT_INTERVALS.copy()
+                        await self._cache_locally(self.intervals)
+                        self._loading = False
+                        return
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to create /config/intervals in Firestore: {e}"
+                        )
 
             # Fallback to local cache
             cached_config = self._load_from_cache()

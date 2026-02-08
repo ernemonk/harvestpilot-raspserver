@@ -102,26 +102,28 @@ class ConfigManager:
                     self._loading = False
                     return
                 else:
-                    # Document exists - check if it has all required intervals
+                    # Document exists - clean up old fields and ensure only current ones exist
                     existing_config = config_doc.to_dict()
                     if existing_config:
-                        # Check for missing keys and update if needed
+                        # Identify extra keys that shouldn't exist
+                        extra_keys = set(existing_config.keys()) - set(self.DEFAULT_INTERVALS.keys())
                         missing_keys = set(self.DEFAULT_INTERVALS.keys()) - set(existing_config.keys())
-                        if missing_keys:
-                            logger.info(f"Found missing intervals: {missing_keys}")
-                            update_dict = {key: self.DEFAULT_INTERVALS[key] for key in missing_keys}
-                            config_doc_ref.update(update_dict)
-                            logger.info(f"Updated /config/intervals with missing keys: {update_dict}")
-                            existing_config.update(update_dict)
                         
-                        # Validate and load the config
-                        validated_config = self._validate_config(existing_config)
-                        if validated_config:
-                            self.intervals = validated_config
-                            await self._cache_locally(self.intervals)
-                            logger.info(f"Loaded intervals from Firestore: {self.intervals}")
-                            self._loading = False
-                            return
+                        # If there are extra keys or missing keys, replace document with clean version
+                        if extra_keys or missing_keys:
+                            logger.info(f"Cleaning up config - removing extra: {extra_keys}, adding missing: {missing_keys}")
+                            # Replace document with only DEFAULT_INTERVALS
+                            config_doc_ref.set(self.DEFAULT_INTERVALS)
+                            logger.info(f"Replaced /config/intervals with clean defaults: {self.DEFAULT_INTERVALS}")
+                            self.intervals = self.DEFAULT_INTERVALS.copy()
+                        else:
+                            # Document is clean, use as is
+                            self.intervals = existing_config
+                        
+                        await self._cache_locally(self.intervals)
+                        logger.info(f"Loaded intervals from Firestore: {self.intervals}")
+                        self._loading = False
+                        return
 
             # Fallback to local cache
             cached_config = self._load_from_cache()

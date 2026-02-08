@@ -31,6 +31,9 @@ class GPIOActuatorController:
         self._running = False
         self._pins_initialized: Dict[int, str] = {}  # bcmPin -> mode
         self._state_callbacks: Dict[int, Callable] = {}
+        self._pin_states: Dict[int, bool] = {}  # Track current pin states
+        self._command_listener = None
+        self._gpio_state_listener = None
         
         # Setup GPIO
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:

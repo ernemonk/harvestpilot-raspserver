@@ -50,8 +50,9 @@ class GPIOActuatorController:
             self.firestore_db = firestore.client()
             self._running = True
             
-            # Start the real-time listener
+            # Start the real-time listeners
             self._start_gpio_listener()
+            self._start_gpio_state_listener()
             
             logger.info(f"GPIO Actuator Controller connected (hardware_serial: {self.hardware_serial}, device_id: {self.device_id})")
             return True
@@ -94,11 +95,61 @@ class GPIOActuatorController:
                         logger.error(f"✗ Error processing GPIO change: {e}", exc_info=True)
             
             # Attach the listener
-            self.listener = commands_ref.on_snapshot(on_snapshot)
+            self._command_listener = commands_ref.on_snapshot(on_snapshot)
             logger.info(f"✓ GPIO command listener ACTIVE on devices/{self.hardware_serial}/commands/")
             
         except Exception as e:
             logger.error(f"✗ Failed to start GPIO listener: {e}", exc_info=True)
+    
+    def _start_gpio_state_listener(self):
+        """Listen for GPIO state changes from Firestore (webapp toggling actuators)"""
+        try:
+            # Listen to gpioState in device doc: devices/{HARDWARE_SERIAL}
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            
+            logger.info(f"✓ Setting up GPIO state listener on devices/{self.hardware_serial}/gpioState")
+            
+            def on_state_snapshot(doc_snapshot, changes, read_time):
+                """Callback when GPIO state changes from Firestore"""
+                logger.debug(f"📡 GPIO state on_snapshot triggered")
+                
+                if doc_snapshot.exists:
+                    doc_data = doc_snapshot.to_dict()
+                    gpio_state = doc_data.get('gpioState', {})
+                    
+                    if gpio_state:
+                        logger.info(f"✓ GPIO state update received: {gpio_state}")
+                        
+                        for pin_str, pin_data in gpio_state.items():
+                            try:
+                                pin = int(pin_str)
+                                state = pin_data.get('state', False) if isinstance(pin_data, dict) else bool(pin_data)
+                                
+                                logger.info(f"✓ GPIO state changed: pin={pin}, state={state} (from Firestore)")
+                                self._apply_state_change(pin, state)
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"✗ Invalid pin format {pin_str}: {e}")
+                    else:
+                        logger.debug("No gpioState in device doc")
+            
+            # Attach the listener
+            self._gpio_state_listener = device_ref.on_snapshot(on_state_snapshot)
+            logger.info(f"✓ GPIO state listener ACTIVE on devices/{self.hardware_serial}")
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to start GPIO state listener: {e}", exc_info=True)
+    
+    def _apply_state_change(self, pin: int, state: bool):
+        """Apply a state change to a GPIO pin - setup if needed"""
+        try:
+            if pin not in self._pins_initialized:
+                self._setup_pin(pin, 'output')
+            
+            self._set_pin_state(pin, state, f"State from Firestore")
+            self._pin_states[pin] = state
+            logger.info(f"✓ GPIO{pin} applied state change: {state}")
+        except Exception as e:
+            logger.error(f"✗ Error applying state change to GPIO{pin}: {e}")
     
     def _process_gpio_command(self, command_id: str, command_data: Dict[str, Any]):
         """Process GPIO commands from Firestore
@@ -183,16 +234,34 @@ class GPIOActuatorController:
         try:
             if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
                 GPIO.output(bcm_pin, GPIO.HIGH if state else GPIO.LOW)
-                logger.info(f"GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
+                logger.debug(f"GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
             else:
-                logger.info(f"[SIM] GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
+                logger.debug(f"[SIM] GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
             
-            # Call any registered callbacks
+            # Track state and call callbacks
+            old_state = self._pin_states.get(bcm_pin)
+            self._pin_states[bcm_pin] = state
+            
             if bcm_pin in self._state_callbacks:
                 self._state_callbacks[bcm_pin](state)
+            
+            # Cache state to device doc in Firestore
+            self._cache_pin_state_to_device(bcm_pin, state)
                 
         except Exception as e:
             logger.error(f"Failed to set GPIO{bcm_pin} state: {e}")
+    
+    def _cache_pin_state_to_device(self, bcm_pin: int, state: bool):
+        """Cache pin state to device doc in Firestore"""
+        try:
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            device_ref.update({
+                f'gpioState.{bcm_pin}.state': state,
+                f'gpioState.{bcm_pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+            })
+            logger.debug(f"📤 GPIO{bcm_pin} state cached to Firestore: {state}")
+        except Exception as e:
+            logger.error(f"Failed to cache GPIO{bcm_pin} state: {e}")
     
     def register_callback(self, bcm_pin: int, callback: Callable[[bool], None]):
         """Register a callback for when a pin state changes"""
@@ -243,9 +312,13 @@ class GPIOActuatorController:
         """Stop listening and cleanup GPIO"""
         self._running = False
         
-        if self.listener:
-            self.listener.unsubscribe()
-            logger.info("GPIO listener stopped")
+        if self._command_listener:
+            self._command_listener.unsubscribe()
+            logger.info("GPIO command listener stopped")
+        
+        if self._gpio_state_listener:
+            self._gpio_state_listener.unsubscribe()
+            logger.info("GPIO state listener stopped")
         
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
             GPIO.cleanup()

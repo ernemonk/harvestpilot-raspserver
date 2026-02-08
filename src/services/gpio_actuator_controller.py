@@ -66,23 +66,39 @@ class GPIOActuatorController:
             # Listen to commands subcollection: devices/{HARDWARE_SERIAL}/commands/
             commands_ref = self.firestore_db.collection('devices').document(self.hardware_serial).collection('commands')
             
+            logger.info(f"✓ Setting up GPIO listener on devices/{self.hardware_serial}/commands/")
+
             def on_snapshot(doc_snapshot, changes, read_time):
                 """Callback when new commands arrive"""
+                logger.debug(f"📡 GPIO on_snapshot triggered - {len(changes)} changes")
+                
                 for change in changes:
-                    if change.type.name == 'ADDED':
-                        command_data = change.document.to_dict()
-                        command_id = change.document.id
-                        
-                        if command_data:
-                            logger.info(f"GPIO command received: {command_id} - {command_data.get('type')}")
-                            self._process_gpio_command(command_id, command_data)
+                    try:
+                        if change.type.name == 'ADDED':
+                            command_data = change.document.to_dict()
+                            command_id = change.document.id
+                            
+                            if command_data:
+                                logger.info(f"✓ GPIO command RECEIVED: {command_id} - type={command_data.get('type')}, data={command_data}")
+                                self._process_gpio_command(command_id, command_data)
+                            else:
+                                logger.warning(f"✗ Empty command data for {command_id}")
+                        elif change.type.name == 'MODIFIED':
+                            command_data = change.document.to_dict()
+                            command_id = change.document.id
+                            logger.debug(f"📝 GPIO command MODIFIED: {command_id}")
+                        elif change.type.name == 'REMOVED':
+                            command_id = change.document.id
+                            logger.debug(f"🗑️  GPIO command REMOVED: {command_id}")
+                    except Exception as e:
+                        logger.error(f"✗ Error processing GPIO change: {e}", exc_info=True)
             
             # Attach the listener
             self.listener = commands_ref.on_snapshot(on_snapshot)
-            logger.info(f"GPIO command listener started on devices/{self.hardware_serial}/commands/")
+            logger.info(f"✓ GPIO command listener ACTIVE on devices/{self.hardware_serial}/commands/")
             
         except Exception as e:
-            logger.error(f"Failed to start GPIO listener: {e}")
+            logger.error(f"✗ Failed to start GPIO listener: {e}", exc_info=True)
     
     def _process_gpio_command(self, command_id: str, command_data: Dict[str, Any]):
         """Process GPIO commands from Firestore
@@ -97,20 +113,24 @@ class GPIOActuatorController:
         """
         try:
             command_type = command_data.get('type')
+            logger.info(f"✓ Processing GPIO command {command_id}: type={command_type}")
             
             if command_type == 'pin_control':
                 pin = command_data.get('pin')
                 action = command_data.get('action', '').lower()
                 duration = command_data.get('duration')
                 
+                logger.info(f"  ↳ pin_control: GPIO{pin} → {action.upper()}" + (f" (duration: {duration}s)" if duration else ""))
+                
                 if not pin or action not in ['on', 'off']:
-                    logger.error(f"Invalid pin_control command: {command_data}")
+                    logger.error(f"✗ Invalid pin_control command: {command_data}")
                     return
                 
                 # Set pin state
                 state = action == 'on'
                 self._setup_pin(pin, 'output')
                 self._set_pin_state(pin, state, f"Command {command_id}")
+                logger.info(f"✓ GPIO{pin} set to {action.upper()} (command: {command_id})")
                 
                 # Optional: auto-off after duration
                 if duration and state:
@@ -119,7 +139,7 @@ class GPIOActuatorController:
                         import time
                         time.sleep(duration)
                         self._set_pin_state(pin, False, f"Auto-off after {duration}s")
-                        logger.info(f"GPIO{pin} auto-turned off after {duration} seconds")
+                        logger.info(f"✓ GPIO{pin} auto-turned off after {duration} seconds")
                     
                     thread = threading.Thread(target=auto_off, daemon=True)
                     thread.start()

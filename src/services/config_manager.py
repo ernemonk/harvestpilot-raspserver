@@ -62,56 +62,70 @@ class ConfigManager:
     async def initialize(self):
         """
         Initialize configuration on startup.
-        Load from Firestore, fallback to local cache, then defaults.
-        Creates /config/intervals in Firestore if it doesn't exist.
+        1. Check if device doc exists
+        2. If not, create it with default intervals
+        3. If it exists but missing intervals, update with missing ones
+        4. Load from Firestore, fallback to cache, then defaults
         """
         if self._loading:
             return
         
         self._loading = True
         try:
-            # Try loading from Firestore first
             if self.firestore_db:
-                firestore_config = await self._load_from_firestore()
-                if firestore_config:
-                    self.intervals = firestore_config
+                # First, ensure device document exists
+                device_doc_ref = (
+                    self.firestore_db.collection("devices")
+                    .document(self.hardware_serial)
+                )
+                device_doc = device_doc_ref.get()
+                
+                if not device_doc.exists:
+                    # Create device doc with initial config
+                    logger.info(f"Device doc doesn't exist, creating with defaults...")
+                    device_doc_ref.set({
+                        "hardware_serial": self.hardware_serial,
+                        "initialized_at": firestore.datetime.datetime.utcnow(),
+                        "status": "initializing"
+                    })
+                    logger.info(f"Created device doc {self.hardware_serial}")
+                else:
+                    logger.info(f"Device doc exists, checking for missing config...")
+                
+                # Now ensure config/intervals subcollection exists
+                config_doc_ref = device_doc_ref.collection("config").document("intervals")
+                config_doc = config_doc_ref.get()
+                
+                if not config_doc.exists:
+                    # Create intervals doc with defaults
+                    logger.info(f"Creating /config/intervals with defaults: {self.DEFAULT_INTERVALS}")
+                    config_doc_ref.set(self.DEFAULT_INTERVALS)
+                    self.intervals = self.DEFAULT_INTERVALS.copy()
                     await self._cache_locally(self.intervals)
-                    logger.info(
-                        f"Loaded intervals from Firestore: {self.intervals}"
-                    )
+                    logger.info(f"Created /config/intervals in Firestore: {self.intervals}")
                     self._loading = False
                     return
                 else:
-                    # Document doesn't exist - create it with defaults
-                    try:
-                        # First ensure parent device doc exists
-                        device_doc = (
-                            self.firestore_db.collection("devices")
-                            .document(self.hardware_serial)
-                        )
-                        device_doc.update({
-                            "config_initialized_at": firestore.datetime.datetime.utcnow(),
-                            "config_status": "initializing"
-                        })
-                        logger.info(f"Updated device doc {self.hardware_serial} for config initialization")
+                    # Document exists - check if it has all required intervals
+                    existing_config = config_doc.to_dict()
+                    if existing_config:
+                        # Check for missing keys and update if needed
+                        missing_keys = set(self.DEFAULT_INTERVALS.keys()) - set(existing_config.keys())
+                        if missing_keys:
+                            logger.info(f"Found missing intervals: {missing_keys}")
+                            update_dict = {key: self.DEFAULT_INTERVALS[key] for key in missing_keys}
+                            config_doc_ref.update(update_dict)
+                            logger.info(f"Updated /config/intervals with missing keys: {update_dict}")
+                            existing_config.update(update_dict)
                         
-                        # Now create the config/intervals subcollection document
-                        config_doc = (
-                            device_doc.collection("config")
-                            .document("intervals")
-                        )
-                        config_doc.set(self.DEFAULT_INTERVALS)
-                        logger.info(
-                            f"Created /config/intervals in Firestore with defaults: {self.DEFAULT_INTERVALS}"
-                        )
-                        self.intervals = self.DEFAULT_INTERVALS.copy()
-                        await self._cache_locally(self.intervals)
-                        self._loading = False
-                        return
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to create /config/intervals in Firestore: {e}"
-                        )
+                        # Validate and load the config
+                        validated_config = self._validate_config(existing_config)
+                        if validated_config:
+                            self.intervals = validated_config
+                            await self._cache_locally(self.intervals)
+                            logger.info(f"Loaded intervals from Firestore: {self.intervals}")
+                            self._loading = False
+                            return
 
             # Fallback to local cache
             cached_config = self._load_from_cache()

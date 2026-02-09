@@ -77,6 +77,14 @@ class GPIOActuatorController:
         except Exception as e:
             logger.warning(f"⚠️  Failed to delete command {command_id}: {e}")
     
+    def _delete_command_sync(self, doc_ref, command_id: str):
+        """Synchronously delete a command after processing (for use in callbacks)"""
+        try:
+            doc_ref.delete()
+            logger.debug(f"✅ Command {command_id} deleted from Firestore")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to delete command {command_id}: {e}")
+    
     def _start_gpio_listener(self):
         """Start listening to GPIO commands in Firestore using hardware_serial as primary key"""
         try:
@@ -110,9 +118,8 @@ class GPIOActuatorController:
                                 # Process the command
                                 self._process_gpio_command(command_id, command_data)
                                 
-                                # Delete command asynchronously to clean up
-                                import asyncio
-                                asyncio.create_task(self._delete_command_async(change.document.reference, command_id))
+                                # Delete command synchronously to clean up (no event loop in callback)
+                                self._delete_command_sync(change.document.reference, command_id)
                             else:
                                 logger.warning(f"✗ Empty command data for {command_id}")
                         

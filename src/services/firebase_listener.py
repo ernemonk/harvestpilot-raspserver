@@ -201,6 +201,12 @@ class FirebaseDeviceListener:
             "pin": 17,
             "action": "on|off",
             "duration": 5  # optional, in seconds
+        }
+        """
+        pin = command.get("pin")
+        action = command.get("action", "").lower()
+        duration = command.get("duration")
+        
         logger.debug(f"[PIN CONTROL] Validating command: pin={pin}, action={action}, duration={duration}")
         
         if not pin or action not in ["on", "off"]:
@@ -226,6 +232,9 @@ class FirebaseDeviceListener:
                 logger.info(f"[PIN CONTROL] ⚫ Setting GPIO{pin} to LOW (OFF)")
                 GPIO.output(pin, GPIO.LOW)
             
+            # Note: Do NOT update gpioState here - let the GPIO actuator controller handle it
+            # This prevents race conditions and oscillation from multiple state updates
+            
             # If duration specified, schedule turn-off
             if duration and action == "on":
                 logger.info(f"[PIN CONTROL] ⏱️  GPIO{pin} will auto-turn off in {duration}s")
@@ -242,13 +251,7 @@ class FirebaseDeviceListener:
                 "duration": duration
             }
         except Exception as e:
-            logger.error(f"[PIN CONTROL] ❌ Pin control FAILED for GPIO{pin}: {e}", exc_info=True
-                "action": action,
-                "status": "success",
-                "duration": duration
-            }
-        except Exception as e:
-            logger.error(f"Pin control failed: {e}")
+            logger.error(f"[PIN CONTROL] ❌ Pin control FAILED for GPIO{pin}: {e}", exc_info=True)
             raise
     
     async def _handle_pwm_control(self, command: Dict[str, Any]) -> Dict[str, Any]:
@@ -452,40 +455,31 @@ class FirebaseDeviceListener:
             "unit": reading.get("unit"),
             "timestamp": datetime.now().isoformat()
         }
-    logger.info(f"[RESPONSE] 📤 Sending response for command {command_id} (type: {command_type}, status: {status})")
+    
+    async def _send_response(self, command_id: str, command_type: str, status: str, result: Any = None):
+        """Send response back to webapp"""
+        try:
+            response = {
+                "id": command_id,
+                "type": command_type,
+                "status": status,
+                "result": result,
+                "timestamp": datetime.now().isoformat(),
+            }
+            
+            logger.info(f"[RESPONSE] 📤 Sending response for command {command_id} (type: {command_type}, status: {status})")
             logger.debug(f"[RESPONSE] Response payload: {response}")
             
-            # Send response to config device ID (where webapp expects it)
-            logger.debug(f"[RESPONSE] Writing to: devices/{config.DEVICE_ID}/responses/{command_id}")
-            self.db.child(f"devices/{config.DEVICE_ID}/responses/{command_id}").set(response)
-            logger.info(f"[RESPONSE] ✅ Response written to config device ID path")
-            
-            # Also send to Firebase ID if different
-            if self.device_id != config.DEVICE_ID:
-                logger.debug(f"[RESPONSE] Writing to: devices/{self.device_id}/responses/{command_id}")
-                self.db.child(f"devices/{self.device_id}/responses/{command_id}").set(response)
-                logger.info(f"[RESPONSE] ✅ Response also written to Firebase ID path")
-            
-            logger.info(f"[RESPONSE] ✅ RESPONSE COMPLETE: {command_id} -> {status}")
+            # Update the command document with the response
+            self.firestore_db.document(f"devices/{self.hardware_serial}/commands/{command_id}").update({
+                "status": status,
+                "result": result,
+                "executedAt": firestore.SERVER_TIMESTAMP,
+            })
+            logger.info(f"[RESPONSE] ✅ Response written for command {command_id}")
             
         except Exception as e:
             logger.error(f"[RESPONSE] ❌ Error sending response for {command_id}: {e}", exc_info=True)
-            logger.error(f"[RESPONSE] Response was: {response}"
-                "device_id": self.device_id,
-                "config_device_id": config.DEVICE_ID
-            }
-            
-            # Send response to config device ID (where webapp expects it)
-            self.db.child(f"devices/{config.DEVICE_ID}/responses/{command_id}").set(response)
-            
-            # Also send to Firebase ID if different
-            if self.device_id != config.DEVICE_ID:
-                self.db.child(f"devices/{self.device_id}/responses/{command_id}").set(response)
-            
-            logger.info(f"Response sent for command {command_id}: {status}")
-            
-        except Exception as e:
-            logger.error(f"Error sending response: {e}", exc_info=True)
     
     def _get_gpio_config(self) -> Dict[str, Any]:
         """Get current GPIO configuration"""

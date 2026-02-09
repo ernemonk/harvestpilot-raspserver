@@ -3,6 +3,7 @@
 This module listens for GPIO state changes in Firestore and updates physical pins.
 """
 
+import asyncio
 import logging
 from typing import Dict, Callable, Optional, Any
 import firebase_admin
@@ -34,6 +35,7 @@ class GPIOActuatorController:
         self._pin_states: Dict[int, bool] = {}  # Track current pin states
         self._command_listener = None
         self._gpio_state_listener = None
+        self._processed_commands: set = set()  # Track processed commands to avoid duplicates
         
         # Setup GPIO
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
@@ -55,7 +57,9 @@ class GPIOActuatorController:
             
             # Start the real-time listeners
             self._start_gpio_listener()
-            self._start_gpio_state_listener()
+            # DISABLED: _start_gpio_state_listener()
+            # The GPIO state listener was the old method that caused feedback loops.
+            # Now we use command-based updates only: commands → GPIO controller → Firestore state
             
             logger.info(f"GPIO Actuator Controller connected (hardware_serial: {self.hardware_serial}, device_id: {self.device_id})")
             return True
@@ -63,6 +67,15 @@ class GPIOActuatorController:
         except Exception as e:
             logger.error(f"Failed to connect GPIO controller: {e}")
             return False
+    
+    async def _delete_command_async(self, doc_ref, command_id: str):
+        """Asynchronously delete a command after processing"""
+        try:
+            await asyncio.sleep(0.1)  # Small delay to ensure processing is complete
+            doc_ref.delete()
+            logger.debug(f"✅ Command {command_id} deleted from Firestore")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to delete command {command_id}: {e}")
     
     def _start_gpio_listener(self):
         """Start listening to GPIO commands in Firestore using hardware_serial as primary key"""
@@ -78,22 +91,36 @@ class GPIOActuatorController:
                 
                 for change in changes:
                     try:
+                        command_id = change.document.id
+                        
+                        # Prevent duplicate processing - only process ADDED event once
                         if change.type.name == 'ADDED':
+                            if command_id in self._processed_commands:
+                                logger.debug(f"⏭️  Command {command_id} already processed, skipping")
+                                continue
+                            
                             command_data = change.document.to_dict()
-                            command_id = change.document.id
                             
                             if command_data:
-                                logger.info(f"✓ GPIO command RECEIVED: {command_id} - type={command_data.get('type')}, data={command_data}")
+                                logger.info(f"✓ GPIO command RECEIVED: {command_id} - type={command_data.get('type')}, pin={command_data.get('pin')}, action={command_data.get('action')}")
+                                
+                                # Mark as processed BEFORE processing
+                                self._processed_commands.add(command_id)
+                                
+                                # Process the command
                                 self._process_gpio_command(command_id, command_data)
+                                
+                                # Delete command asynchronously to clean up
+                                import asyncio
+                                asyncio.create_task(self._delete_command_async(change.document.reference, command_id))
                             else:
                                 logger.warning(f"✗ Empty command data for {command_id}")
-                        elif change.type.name == 'MODIFIED':
-                            command_data = change.document.to_dict()
-                            command_id = change.document.id
-                            logger.debug(f"📝 GPIO command MODIFIED: {command_id}")
+                        
                         elif change.type.name == 'REMOVED':
-                            command_id = change.document.id
-                            logger.debug(f"🗑️  GPIO command REMOVED: {command_id}")
+                            # Clean up processed commands tracking
+                            self._processed_commands.discard(command_id)
+                            logger.debug(f"🗑️  Command {command_id} removed from Firestore")
+                    
                     except Exception as e:
                         logger.error(f"✗ Error processing GPIO change: {e}", exc_info=True)
             
@@ -167,12 +194,17 @@ class GPIOActuatorController:
     def _apply_state_change(self, pin: int, state: bool):
         """Apply a state change to a GPIO pin - setup if needed"""
         try:
+            # Check if state actually changed before applying
+            current_state = self._pin_states.get(pin)
+            if current_state == state:
+                logger.debug(f"GPIO{pin} state unchanged ({state}), skipping redundant update")
+                return
+            
             if pin not in self._pins_initialized:
                 self._setup_pin(pin, 'output')
             
             self._set_pin_state(pin, state, f"State from Firestore")
-            self._pin_states[pin] = state
-            logger.info(f"✓ GPIO{pin} applied state change: {state}")
+            logger.info(f"✓ GPIO{pin} applied state change: {current_state} → {state}")
         except Exception as e:
             logger.error(f"✗ Error applying state change to GPIO{pin}: {e}")
     
@@ -263,28 +295,32 @@ class GPIOActuatorController:
             else:
                 logger.debug(f"[SIM] GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
             
-            # Track state and call callbacks
+            # Track state and call callbacks - ONLY if state actually changed
             old_state = self._pin_states.get(bcm_pin)
-            self._pin_states[bcm_pin] = state
-            
-            if bcm_pin in self._state_callbacks:
-                self._state_callbacks[bcm_pin](state)
-            
-            # Cache state to device doc in Firestore
-            self._cache_pin_state_to_device(bcm_pin, state)
+            if old_state != state:
+                self._pin_states[bcm_pin] = state
+                
+                if bcm_pin in self._state_callbacks:
+                    self._state_callbacks[bcm_pin](state)
+                
+                # Cache state to Firestore ONLY if it actually changed
+                self._cache_pin_state_to_device(bcm_pin, state)
+                logger.info(f"✓ GPIO{bcm_pin} state CHANGED: {old_state} → {state}")
+            else:
+                logger.debug(f"GPIO{bcm_pin} state unchanged: {state} (no Firestore update)")
                 
         except Exception as e:
             logger.error(f"Failed to set GPIO{bcm_pin} state: {e}")
     
     def _cache_pin_state_to_device(self, bcm_pin: int, state: bool):
-        """Cache pin state to device doc in Firestore"""
+        """Cache pin state to device doc in Firestore - only called on actual state changes"""
         try:
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
             device_ref.update({
                 f'gpioState.{bcm_pin}.state': state,
                 f'gpioState.{bcm_pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
             })
-            logger.debug(f"📤 GPIO{bcm_pin} state cached to Firestore: {state}")
+            logger.info(f"📤 GPIO{bcm_pin} state SYNCED to Firestore: {state}")
         except Exception as e:
             logger.error(f"Failed to cache GPIO{bcm_pin} state: {e}")
     

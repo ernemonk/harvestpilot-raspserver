@@ -227,14 +227,24 @@ class FirestoreScheduleListener:
         """
         changed_fields = []
         
-        # Check each field
-        for field in ['enabled', 'start_time', 'end_time', 'interval_seconds', 
-                     'duration_seconds', 'pwm_duty_start', 'pwm_duty_end', 'digital_state']:
-            old_val = getattr(old_def, field, None)
-            new_val = new_def.get(field)
+        # Check each field — map camelCase (Firestore) to snake_case (cache)
+        field_mapping = {
+            'enabled': 'enabled',
+            'start_time': 'startTime',
+            'end_time': 'endTime',
+            'interval_seconds': 'frequencySeconds',
+            'duration_seconds': 'durationSeconds',
+            'pwm_duty_start': 'pwm_duty_start',
+            'pwm_duty_end': 'pwm_duty_end',
+            'digital_state': 'digital_state',
+        }
+        for cache_field, firestore_field in field_mapping.items():
+            old_val = getattr(old_def, cache_field, None)
+            # Try camelCase first (webapp format), then snake_case
+            new_val = new_def.get(firestore_field) or new_def.get(cache_field)
             
             if old_val != new_val:
-                changed_fields.append(field)
+                changed_fields.append(cache_field)
         
         return changed_fields if changed_fields else None
     

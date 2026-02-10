@@ -152,22 +152,23 @@ class ScheduleCache:
                 self._cache[gpio_number] = {}
             
             # Create schedule definition
+            # Support both camelCase (webapp) and snake_case field names
             sched = ScheduleDefinition(
                 schedule_id=schedule_id,
                 gpio_number=gpio_number,
                 schedule_type=schedule_data.get('type', 'unknown'),
                 enabled=schedule_data.get('enabled', True),
-                start_time=schedule_data.get('start_time'),
-                end_time=schedule_data.get('end_time'),
-                interval_seconds=schedule_data.get('interval_seconds'),
-                duration_seconds=schedule_data.get('duration_seconds'),
+                start_time=schedule_data.get('startTime') or schedule_data.get('start_time'),
+                end_time=schedule_data.get('endTime') or schedule_data.get('end_time'),
+                interval_seconds=schedule_data.get('frequencySeconds') or schedule_data.get('interval_seconds'),
+                duration_seconds=schedule_data.get('durationSeconds') or schedule_data.get('duration_seconds'),
                 pwm_duty_start=schedule_data.get('pwm_duty_start'),
                 pwm_duty_end=schedule_data.get('pwm_duty_end'),
                 pwm_fade_duration=schedule_data.get('pwm_fade_duration'),
                 digital_state=schedule_data.get('digital_state'),
                 read_interval_seconds=schedule_data.get('read_interval_seconds'),
                 store_readings=schedule_data.get('store_readings', True),
-                description=schedule_data.get('description', ''),
+                description=schedule_data.get('name') or schedule_data.get('description', ''),
                 last_run_at=None,
                 is_active=False
             )

@@ -513,14 +513,21 @@ class GPIOActuatorController:
                 logger.info(f"⏸️  Schedule {schedule_name} on GPIO{pin} is disabled, skipping")
                 return
             
-            # Check if we're in the time window
+            # Check if we're in the time window (supports overnight windows)
             from datetime import datetime
             now = datetime.now().strftime('%H:%M')
             
             if start_time and end_time:
-                if not (start_time <= now <= end_time):
-                    logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside time window ({start_time}-{end_time}), skipping")
-                    return
+                if start_time <= end_time:
+                    # Same-day window (e.g., 06:00 to 22:00)
+                    if not (start_time <= now <= end_time):
+                        logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside time window ({start_time}-{end_time}), skipping")
+                        return
+                else:
+                    # Overnight window (e.g., 22:00 to 06:00)
+                    if not (now >= start_time or now <= end_time):
+                        logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside overnight window ({start_time}-{end_time}), skipping")
+                        return
             
             with self._schedule_execution_lock:
                 self._schedule_state_tracker.mark_running(pin, schedule_id)
@@ -547,12 +554,6 @@ class GPIOActuatorController:
             with self._schedule_execution_lock:
                 self._schedule_state_tracker.mark_stopped(pin, schedule_id)
             
-        except Exception as e:
-            logger.error(f"Error executing schedule {schedule_id} on GPIO{pin}: {e}", exc_info=True)
-            
-            else:
-                logger.warning(f"Unknown schedule type: {schedule_type}")
-            
             # Update Firestore with last run time
             with self._schedule_execution_lock:
                 self._schedule_state_tracker.update_last_run(pin, schedule_id)
@@ -560,8 +561,6 @@ class GPIOActuatorController:
             self._async_firestore_write({
                 f'gpioState.{pin}.schedules.{schedule_id}.last_run_at': firestore.SERVER_TIMESTAMP,
             })
-            
-            logger.info(f"✓ Schedule completed: GPIO{pin}/{schedule_id}")
             
         except Exception as e:
             logger.error(f"Error executing schedule {schedule_id} on GPIO{pin}: {e}", exc_info=True)

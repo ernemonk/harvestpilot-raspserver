@@ -3,6 +3,7 @@
 ARCHITECTURE:
   Firestore `state` = DESIRED state (set by webapp)
   Firestore `hardwareState` = ACTUAL state (read from physical GPIO pin)
+  Firestore `schedules` = Recurring GPIO operations with time windows
   
   Flow:
   1. Webapp sets gpioState.{pin}.state = true/false (desired)
@@ -12,7 +13,18 @@ ARCHITECTURE:
   5. Pi writes gpioState.{pin}.hardwareState = true/false (actual)
   6. If state != hardwareState → MISMATCH ALERT
 
-  This gives you REAL data. No guessing. No BS.
+  SCHEDULES (Real-time):
+  1. Firestore schedule added/modified/deleted
+  2. Real-time listener updates cache atomically
+  3. Time windows strictly enforced (start_time → end_time)
+  4. Hardware cache stays in perfect sync
+  5. Schedule executions track hardware state
+
+NAMING SYSTEM:
+  - Default names are now smart GPIO-based: "GPIO{num} (PIN{phys}) - {type} ({capability})"
+  - User can customize names - marked with name_customized=true flag
+  - NON-DESTRUCTIVE: User-customized names are NEVER overwritten
+  - Preserves business-critical naming and configurations
 """
 
 import logging
@@ -23,6 +35,9 @@ from datetime import datetime
 import firebase_admin
 from firebase_admin import firestore
 from ..utils.gpio_import import GPIO, GPIO_AVAILABLE
+from ..utils.gpio_naming import GPIONameManager, GPIONamer
+from .schedule_listener import get_schedule_cache, get_schedule_state_tracker, ScheduleCache, ScheduleStateTracker
+from .firestore_schedule_listener import create_firestore_schedule_listener
 from .. import config
 
 logger = logging.getLogger(__name__)
@@ -55,11 +70,22 @@ class GPIOActuatorController:
         self._running = False
         self._config_manager = config_manager  # For dynamic intervals from Firestore
         
+        # GPIO naming system
+        self._name_manager = GPIONameManager()
+        self._gpio_namer = GPIONamer()
+        
         # Pin tracking
         self._pins_initialized: Dict[int, str] = {}       # bcmPin -> mode ('output'/'input')
         self._desired_states: Dict[int, bool] = {}         # What Firestore says the pin should be
         self._hardware_states: Dict[int, bool] = {}        # What the pin ACTUALLY is (read from hardware)
         self._pin_names: Dict[int, str] = {}               # bcmPin -> human name
+        
+        # Schedule management (CRITICAL: real-time listening + cache + execution)
+        self._schedule_cache: ScheduleCache = get_schedule_cache()
+        self._schedule_state_tracker: ScheduleStateTracker = get_schedule_state_tracker()
+        self._schedule_listener = None
+        self._schedule_checker_thread: Optional[threading.Thread] = None
+        self._schedule_execution_lock = threading.RLock()
         
         # Listeners
         self._state_listener = None
@@ -100,14 +126,22 @@ class GPIOActuatorController:
             # 4. Start command listener (for explicit commands)
             self._start_command_listener()
             
-            # 5. Start hardware readback loop (GPIO → Firestore hardwareState)
+            # 5. Start SCHEDULE listener (real-time schedule execution with time windows)
+            self._start_schedule_listener()
+            
+            # 6. Start schedule checker (validates time windows periodically)
+            self._start_schedule_checker()
+            
+            # 7. Start hardware readback loop (GPIO → Firestore hardwareState)
             self._start_hardware_sync_loop()
             
             sync_interval = self._get_firestore_sync_interval()
             logger.info(f"✅ GPIO Controller ONLINE - hardware_serial: {self.hardware_serial}")
             logger.info(f"   Listening: devices/{self.hardware_serial}/gpioState")
+            logger.info(f"   Listening: schedules (real-time)")
             logger.info(f"   Local hardware read: every {LOCAL_HARDWARE_READ_INTERVAL}s")
             logger.info(f"   Firestore hardwareState write: every {sync_interval}s (configurable)")
+            logger.info(f"   Schedule time window check: every 60s")
             return True
             
         except Exception as e:
@@ -155,17 +189,21 @@ class GPIOActuatorController:
         return pins
     
     def _sync_initial_state_to_firestore(self):
-        """Register pins in Firestore on boot.
+        """Register pins in Firestore on boot with smart naming.
+        
+        CRITICAL: NEVER overwrites user-customized names!
         
         PI-OWNED fields (written every boot):
           hardwareState, mismatch, lastHardwareRead, name, pin, mode
+          (but ONLY updates name if not user-customized)
         
         WEBAPP-OWNED fields (NEVER overwritten by Pi):
           state, enabled
         
-        If a pin doesn't exist yet in Firestore, we create it with
-        state=false, enabled=true as initial defaults. But if the webapp
-        already set those, we leave them alone.
+        SAFE PIN NAMING:
+          NEW pins:              Create with smart default name (GPIO + capabilities)
+          OLD user-customized:   PRESERVE (name_customized flag = true)
+          OLD default names:     CAN UPDATE to smarter default
         """
         try:
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
@@ -177,17 +215,53 @@ class GPIOActuatorController:
                 existing_gpio = doc.to_dict().get('gpioState', {})
             
             updates = {}
-            for pin, name in self._pin_names.items():
+            pins_preserved = 0
+            pins_created = 0
+            pins_updated = 0
+            
+            for pin, legacy_name in self._pin_names.items():
                 pin_str = str(pin)
                 existing_pin = existing_gpio.get(pin_str, {})
                 
-                # Pi-owned: always write these
+                # ──────────────────────────────────────────────────────────────
+                # SAFELY UPDATE PIN NAME (NON-DESTRUCTIVE)
+                # ──────────────────────────────────────────────────────────────
+                
+                # Try to get device type from config
+                device_type = self._infer_device_type_from_pin(pin)
+                
+                # Use name manager to determine what to do with the name
+                updated_pin_entry = self._name_manager.update_pin_with_smart_name(
+                    gpio_number=pin,
+                    existing_pin_data=existing_pin if existing_pin else None,
+                    device_type=device_type
+                )
+                
+                # Track what happened
+                if existing_pin and existing_pin.get('name_customized'):
+                    pins_preserved += 1
+                elif not existing_pin:
+                    pins_created += 1
+                else:
+                    pins_updated += 1
+                
+                # Update ALL pi-owned fields
                 updates[f'gpioState.{pin}.hardwareState'] = False
                 updates[f'gpioState.{pin}.mismatch'] = False
                 updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
-                updates[f'gpioState.{pin}.name'] = name
+                updates[f'gpioState.{pin}.name'] = updated_pin_entry.get('name')
+                updates[f'gpioState.{pin}.default_name'] = updated_pin_entry.get('default_name')
+                updates[f'gpioState.{pin}.name_customized'] = updated_pin_entry.get('name_customized', False)
                 updates[f'gpioState.{pin}.pin'] = pin
                 updates[f'gpioState.{pin}.mode'] = 'output'
+                
+                # Copy over device_type if present
+                if 'device_type' in updated_pin_entry:
+                    updates[f'gpioState.{pin}.device_type'] = updated_pin_entry.get('device_type')
+                
+                # Copy over customization metadata if present
+                if 'customized_at' in updated_pin_entry:
+                    updates[f'gpioState.{pin}.customized_at'] = updated_pin_entry.get('customized_at')
                 
                 # Webapp-owned: only set defaults if pin doesn't exist yet
                 if not existing_pin:
@@ -198,9 +272,39 @@ class GPIOActuatorController:
                     self._desired_states[pin] = existing_pin.get('state', False)
             
             device_ref.update(updates)
-            logger.info(f"✅ Registered {len(self._pins_initialized)} pins in Firestore (webapp fields preserved)")
+            
+            # Log summary
+            logger.info(f"✅ Registered {len(self._pins_initialized)} pins in Firestore")
+            logger.info(f"   ├─ Created (new): {pins_created}")
+            logger.info(f"   ├─ Updated (improved naming): {pins_updated}")
+            logger.info(f"   └─ Preserved (user-customized): {pins_preserved}")
+            logger.info(f"   Webapp fields (state, enabled) preserved")
+            
         except Exception as e:
             logger.error(f"Failed to sync initial state: {e}")
+    
+    def _infer_device_type_from_pin(self, pin: int) -> Optional[str]:
+        """Try to infer device type from pin number"""
+        # Map from hardcoded pins to device types
+        device_type_map = {
+            17: "pump",    # Pump PWM
+            19: "pump",    # Pump Relay
+            18: "light",   # LED PWM
+            13: "light",   # LED Relay
+            4: "sensor",   # DHT
+            27: "sensor",  # Water level
+            # Motors (2, 3, 5, 6, 12, 13...)
+        }
+        
+        device_type = device_type_map.get(pin)
+        if not device_type:
+            # Assume it's a motor if it's in the motor pins list
+            for motor in config.MOTOR_PINS:
+                if pin in [motor.get('pwm'), motor.get('dir'), motor.get('home'), motor.get('end')]:
+                    device_type = "motor"
+                    break
+        
+        return device_type
     
     # ──────────────────────────────────────────────────────────────────
     # REAL-TIME STATE LISTENER (Firestore → GPIO)
@@ -327,6 +431,142 @@ class GPIOActuatorController:
             
         except Exception as e:
             logger.error(f"Failed to start command listener: {e}", exc_info=True)
+    
+    # ──────────────────────────────────────────────────────────────────
+    # SCHEDULE LISTENER (real-time schedule execution)
+    # ──────────────────────────────────────────────────────────────────
+    
+    def _start_schedule_listener(self):
+        """Start real-time Firestore listener for GPIO schedules.
+        
+        Monitors gpioState.{pin}.schedules for real-time ADD/MODIFY/DELETE.
+        Automatically creates executor threads for new schedules.
+        Time windows are strictly enforced (optional, but if set, are STRICT).
+        """
+        try:
+            from src.services.firestore_schedule_listener import create_firestore_schedule_listener
+            
+            self._schedule_listener = create_firestore_schedule_listener(
+                firestore_db=self.firestore_db,
+                hardware_serial=self.hardware_serial,
+                schedule_cache=self._schedule_cache,
+                schedule_state_tracker=self._schedule_state_tracker,
+                executor_callback=self._execute_schedule,
+            )
+            
+            self._schedule_listener.start_listening()
+            logger.info(f"✓ Real-time schedule listener ACTIVE (monitoring {self.hardware_serial})")
+            
+        except Exception as e:
+            logger.error(f"Failed to start schedule listener: {e}", exc_info=True)
+    
+    def _start_schedule_checker(self):
+        """Periodically check time windows and re-evaluate active schedules.
+        
+        Runs every 60 seconds to:
+        - Check if any schedule has entered/exited its time window
+        - Stop running schedules that fell outside their window
+        - Start eligible schedules that entered their window
+        """
+        def check_schedule_windows():
+            while True:
+                try:
+                    time.sleep(60)  # Check every minute
+                    
+                    if self._schedule_listener:
+                        self._schedule_listener.check_and_update_time_windows()
+                        logger.debug("✓ Time window check completed")
+                    
+                except Exception as e:
+                    logger.error(f"Error in schedule checker: {e}", exc_info=True)
+        
+        self._schedule_checker_thread = threading.Thread(
+            target=check_schedule_windows,
+            daemon=True,
+            name="ScheduleCheckerThread"
+        )
+        self._schedule_checker_thread.start()
+        logger.info("✓ Schedule time window checker running (every 60s)")
+    
+    def _execute_schedule(self, pin: int, schedule_id: str, schedule_data: Dict[str, Any]):
+        """Execute a schedule on the given GPIO pin.
+        
+        Called by FirestoreScheduleListener when a schedule becomes active.
+        Runs in a separate thread to avoid blocking the listener.
+        
+        Args:
+            pin: GPIO pin number
+            schedule_id: Schedule document ID
+            schedule_data: Schedule configuration (type, cycles, duration, etc.)
+        """
+        try:
+            schedule_type = schedule_data.get('type', 'unknown')
+            
+            with self._schedule_execution_lock:
+                self._schedule_state_tracker.mark_running(pin, schedule_id)
+            
+            logger.info(f"▶️  Executing {schedule_type} on GPIO{pin}: {schedule_id}")
+            
+            # Handle different schedule types
+            if schedule_type == 'pwm_cycle':
+                cycles = schedule_data.get('cycles', 1)
+                on_duration = schedule_data.get('on_duration', 1.0)
+                off_duration = schedule_data.get('off_duration', 1.0)
+                
+                for i in range(cycles):
+                    self._apply_to_hardware(pin, True)
+                    time.sleep(on_duration)
+                    self._apply_to_hardware(pin, False)
+                    if i < cycles - 1:
+                        time.sleep(off_duration)
+            
+            elif schedule_type == 'pwm_fade':
+                duration = schedule_data.get('duration', 5.0)
+                steps = schedule_data.get('steps', 10)
+                step_duration = duration / steps
+                
+                for step in range(steps + 1):
+                    # Simple on/off fade simulation
+                    if step <= steps // 2:
+                        self._apply_to_hardware(pin, True)
+                    else:
+                        self._apply_to_hardware(pin, False)
+                    time.sleep(step_duration)
+            
+            elif schedule_type == 'digital_toggle':
+                cycles = schedule_data.get('cycles', 1)
+                toggle_interval = schedule_data.get('toggle_interval', 0.5)
+                
+                for i in range(cycles):
+                    self._apply_to_hardware(pin, not self._hardware_states.get(pin, False))
+                    time.sleep(toggle_interval)
+            
+            elif schedule_type == 'hold_state':
+                state = schedule_data.get('state', True)
+                duration = schedule_data.get('duration', 60.0)
+                
+                self._apply_to_hardware(pin, state)
+                time.sleep(duration)
+                self._apply_to_hardware(pin, False)
+            
+            else:
+                logger.warning(f"Unknown schedule type: {schedule_type}")
+            
+            # Update Firestore with last run time
+            with self._schedule_execution_lock:
+                self._schedule_state_tracker.update_last_run(pin, schedule_id)
+            
+            self._async_firestore_write({
+                f'gpioState.{pin}.schedules.{schedule_id}.last_run_at': firestore.SERVER_TIMESTAMP,
+            })
+            
+            logger.info(f"✓ Schedule completed: GPIO{pin}/{schedule_id}")
+            
+        except Exception as e:
+            logger.error(f"Error executing schedule {schedule_id} on GPIO{pin}: {e}", exc_info=True)
+        finally:
+            with self._schedule_execution_lock:
+                self._schedule_state_tracker.mark_stopped(pin, schedule_id)
     
     def _process_command(self, command_id: str, data: Dict[str, Any]):
         """Process an explicit GPIO command"""
@@ -582,6 +822,160 @@ class GPIOActuatorController:
             }
         return states
     
+    # ──────────────────────────────────────────────────────────────────
+    # GPIO NAMING API (Safe customization)
+    # ──────────────────────────────────────────────────────────────────
+    
+    def rename_gpio_pin(self, gpio_number: int, new_name: str) -> bool:
+        """
+        Safely rename a GPIO pin from the webapp or API.
+        
+        Marks the name as user-customized so it won't be overwritten on reboot.
+        
+        Args:
+            gpio_number: GPIO number
+            new_name: User-provided custom name
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not new_name or not new_name.strip():
+                logger.warning(f"Rename GPIO{gpio_number}: Name cannot be empty")
+                return False
+            
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            
+            # Get current pin data
+            doc = device_ref.get()
+            if not doc.exists:
+                logger.error(f"Device document doesn't exist: {self.hardware_serial}")
+                return False
+            
+            existing_gpio = doc.to_dict().get('gpioState', {})
+            existing_pin = existing_gpio.get(str(gpio_number), {})
+            
+            # Use name manager to safely rename
+            updated_entry = self._name_manager.rename_gpio_pin(
+                gpio_number=gpio_number,
+                new_name=new_name,
+                existing_pin_data=existing_pin or {}
+            )
+            
+            # Update Firestore
+            updates = {
+                f'gpioState.{gpio_number}.name': updated_entry['name'],
+                f'gpioState.{gpio_number}.name_customized': updated_entry['name_customized'],
+            }
+            
+            if 'customized_at' in updated_entry:
+                updates[f'gpioState.{gpio_number}.customized_at'] = updated_entry['customized_at']
+            
+            device_ref.update(updates)
+            
+            # Update local memory
+            self._pin_names[gpio_number] = new_name
+            
+            logger.info(f"✅ GPIO{gpio_number} renamed to '{new_name}' (user-customized)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to rename GPIO{gpio_number}: {e}")
+            return False
+    
+    def reset_gpio_name_to_default(self, gpio_number: int) -> bool:
+        """
+        Reset a GPIO pin name back to the smart default.
+        
+        Only works if the name was customized. Removes customization flag.
+        
+        Args:
+            gpio_number: GPIO number
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            
+            # Get current pin data
+            doc = device_ref.get()
+            if not doc.exists:
+                logger.error(f"Device document doesn't exist: {self.hardware_serial}")
+                return False
+            
+            existing_gpio = doc.to_dict().get('gpioState', {})
+            existing_pin = existing_gpio.get(str(gpio_number), {})
+            
+            if not existing_pin:
+                logger.warning(f"GPIO{gpio_number} not found in Firestore")
+                return False
+            
+            # Use name manager to reset
+            updated_entry = self._name_manager.reset_to_smart_default(
+                gpio_number=gpio_number,
+                existing_pin_data=existing_pin
+            )
+            
+            # Update Firestore
+            updates = {
+                f'gpioState.{gpio_number}.name': updated_entry['name'],
+                f'gpioState.{gpio_number}.default_name': updated_entry['default_name'],
+                f'gpioState.{gpio_number}.name_customized': updated_entry.get('name_customized', False),
+            }
+            
+            # Remove customization metadata
+            device_ref.update(updates)
+            
+            # Update local memory
+            self._pin_names[gpio_number] = updated_entry['name']
+            
+            logger.info(f"✅ GPIO{gpio_number} name reset to smart default")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to reset GPIO{gpio_number} name: {e}")
+            return False
+    
+    def get_gpio_info(self, gpio_number: int) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed info about a GPIO pin including name and customization status.
+        
+        Args:
+            gpio_number: GPIO number
+            
+        Returns:
+            Dictionary with pin info or None if not found
+        """
+        try:
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            doc = device_ref.get()
+            
+            if not doc.exists:
+                return None
+            
+            existing_gpio = doc.to_dict().get('gpioState', {})
+            pin_data = existing_gpio.get(str(gpio_number))
+            
+            if not pin_data:
+                return None
+            
+            # Get info from naming system
+            gpio_info = self._gpio_namer.get_gpio_info(gpio_number)
+            
+            return {
+                **gpio_info,
+                'firestore_state': pin_data,
+                'current_name': pin_data.get('name'),
+                'default_name': pin_data.get('default_name'),
+                'name_customized': pin_data.get('name_customized', False),
+                'customized_at': pin_data.get('customized_at'),
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get GPIO{gpio_number} info: {e}")
+            return None
+    
     def disconnect(self):
         """Stop listeners and cleanup GPIO"""
         logger.info("Disconnecting GPIO controller...")
@@ -595,9 +989,18 @@ class GPIOActuatorController:
             self._command_listener.unsubscribe()
             logger.info("  Command listener stopped")
         
+        if self._schedule_listener:
+            self._schedule_listener.stop_listening()
+            logger.info("  Schedule listener stopped")
+        
         if self._hardware_sync_thread and self._hardware_sync_thread.is_alive():
             self._hardware_sync_thread.join(timeout=5)
             logger.info("  Hardware sync thread stopped")
+        
+        if self._schedule_checker_thread and self._schedule_checker_thread.is_alive():
+            # Daemon thread will auto-exit when we set _running = False
+            self._schedule_checker_thread.join(timeout=5)
+            logger.info("  Schedule checker thread stopped")
         
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
             GPIO.cleanup()

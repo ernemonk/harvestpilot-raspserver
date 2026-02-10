@@ -2,6 +2,11 @@
 """
 Advanced GPIO Pin Configuration System with Scheduling
 Allows per-Raspberry Pi dynamic pin assignment and scheduled operations
+
+NAMING SYSTEM:
+  - Default names are smart GPIO-based: "GPIO{num} (PIN{phys}) - {type} ({capability})"
+  - User can customize names - tracked with name_customized flag
+  - NON-DESTRUCTIVE: User customizations are never overwritten
 """
 
 import json
@@ -10,6 +15,9 @@ from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, asdict, field
 from enum import Enum
 from datetime import datetime, time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PinMode(Enum):
@@ -76,19 +84,29 @@ class Schedule:
 
 @dataclass
 class GPIOPin:
-    """GPIO Pin configuration with scheduling support"""
+    """GPIO Pin configuration with scheduling support
+    
+    NAMING SYSTEM:
+      - name: Current name (user-customizable or smart default)
+      - default_name: Smart auto-generated default based on GPIO + capabilities
+      - name_customized: Flag indicating if user has set a custom name
+      - customized_at: Timestamp when name was customized
+    """
     gpio_number: int           # BCM GPIO number
     physical_pin: int          # Physical pin number on header
     mode: str                  # INPUT, OUTPUT, PWM, SENSOR
     device_type: str           # pump, light, motor, sensor_dht, sensor_water, etc
     device_id: str             # Unique device ID (e.g., "pump-001")
-    name: str                  # Human-readable name
+    name: str                  # Human-readable name (user-customizable)
     enabled: bool              # Is this pin active?
     pwm_frequency: Optional[int] = None  # For PWM pins (Hz)
     pull_up: Optional[bool] = None       # For INPUT pins
     active_high: bool = True             # Logic level (True=HIGH active, False=LOW active)
     config: Dict[str, Any] = None        # Device-specific config
     schedules: List[Schedule] = field(default_factory=list)  # Scheduled operations
+    default_name: Optional[str] = None   # Smart default name (GPIO-based)
+    name_customized: bool = False        # Whether user set custom name
+    customized_at: Optional[str] = None  # When name was customized
 
 
 @dataclass
@@ -109,6 +127,14 @@ class PinConfigManager:
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.pin_config_file = self.config_dir / "gpio_pins.json"
+        
+        # Import naming utility
+        try:
+            from .gpio_naming import GPIONamer
+            self.gpio_namer = GPIONamer()
+        except ImportError:
+            self.gpio_namer = None
+            logger.warning("gpio_naming module not available - using basic naming")
     
     def create_default_config(
         self,
@@ -116,7 +142,16 @@ class PinConfigManager:
         module_id: str = "module-001",
         description: str = ""
     ) -> GPIOConfiguration:
-        """Create default GPIO configuration for a Pi"""
+        """Create default GPIO configuration for a Pi with smart naming"""
+        
+        # Generate smart default names if namer is available
+        def get_smart_name(gpio_num: int, device_type: str) -> str:
+            if self.gpio_namer:
+                default = self.gpio_namer.generate_default_name(gpio_num, device_type)
+                return default
+            else:
+                # Fallback to basic naming
+                return f"GPIO {gpio_num} ({device_type})"
         
         pins = [
             GPIOPin(
@@ -125,7 +160,8 @@ class PinConfigManager:
                 mode="PWM",
                 device_type="light",
                 device_id="light-001",
-                name="LED Strip",
+                name=get_smart_name(18, "light"),
+                default_name=get_smart_name(18, "light"),
                 enabled=True,
                 pwm_frequency=1000,
                 config={"intensity_min": 0, "intensity_max": 100}
@@ -136,7 +172,8 @@ class PinConfigManager:
                 mode="PWM",
                 device_type="pump",
                 device_id="pump-001",
-                name="Irrigation Pump",
+                name=get_smart_name(17, "pump"),
+                default_name=get_smart_name(17, "pump"),
                 enabled=True,
                 pwm_frequency=1000,
                 config={"speed_min": 0, "speed_max": 100}
@@ -148,7 +185,8 @@ class PinConfigManager:
                 mode="OUTPUT",
                 device_type="motor",
                 device_id="motor-1-pwm",
-                name="Tray 1 Motor PWM",
+                name=get_smart_name(2, "motor"),
+                default_name=get_smart_name(2, "motor"),
                 enabled=True,
                 pwm_frequency=1000,
                 config={"tray_id": 1}
@@ -159,7 +197,8 @@ class PinConfigManager:
                 mode="OUTPUT",
                 device_type="motor",
                 device_id="motor-1-dir",
-                name="Tray 1 Motor Direction",
+                name=get_smart_name(3, "motor"),
+                default_name=get_smart_name(3, "motor"),
                 enabled=True,
                 config={"tray_id": 1}
             ),
@@ -170,7 +209,8 @@ class PinConfigManager:
                 mode="SENSOR",
                 device_type="sensor_dht",
                 device_id="sensor-dht22",
-                name="DHT22 (Temp/Humidity)",
+                name=get_smart_name(4, "sensor"),
+                default_name=get_smart_name(4, "sensor"),
                 enabled=True,
                 config={"sensor_type": "DHT22"}
             ),
@@ -180,7 +220,8 @@ class PinConfigManager:
                 mode="INPUT",
                 device_type="sensor_water",
                 device_id="sensor-water",
-                name="Water Level Sensor",
+                name=get_smart_name(27, "sensor"),
+                default_name=get_smart_name(27, "sensor"),
                 enabled=True,
                 pull_up=True,
                 active_high=False,  # Active LOW
@@ -241,12 +282,27 @@ class PinConfigManager:
         gpio_number: int,
         device_type: str,
         device_id: str,
-        name: str,
+        name: Optional[str] = None,
         mode: str = "OUTPUT",
         pwm_frequency: Optional[int] = None,
-        config: Optional[Dict] = None
+        config: Optional[Dict] = None,
+        use_smart_default: bool = True
     ) -> bool:
-        """Assign a GPIO pin to a device"""
+        """Assign a GPIO pin to a device with optional smart naming.
+        
+        Args:
+            gpio_number: GPIO number
+            device_type: Device type (pump, light, motor, sensor, etc)
+            device_id: Unique device ID
+            name: Custom name (if None, will use smart default if enabled)
+            mode: GPIO mode (OUTPUT, INPUT, PWM, SENSOR)
+            pwm_frequency: PWM frequency for PWM pins
+            config: Device-specific config dict
+            use_smart_default: If True and name is None, generate smart name
+            
+        Returns:
+            True if successful, False otherwise
+        """
         
         current_config = self.load_config()
         if not current_config:
@@ -275,6 +331,24 @@ class PinConfigManager:
                 current_config.pins.remove(existing_pin)
                 print(f"⚠️  Removed existing assignment for GPIO {gpio_number}")
         
+        # Determine pin name
+        pin_name = name
+        name_customized = False
+        customized_at = None
+        
+        if not pin_name:
+            if use_smart_default and self.gpio_namer:
+                # Generate smart default
+                pin_name = self.gpio_namer.generate_default_name(gpio_number, device_type)
+                logger.debug(f"Generated smart name for GPIO{gpio_number}: {pin_name}")
+            else:
+                # Fallback basic name
+                pin_name = f"GPIO {gpio_number} ({device_type})"
+        else:
+            # User provided a custom name
+            name_customized = True
+            customized_at = datetime.now().isoformat()
+        
         # Create new pin configuration
         new_pin = GPIOPin(
             gpio_number=gpio_number,
@@ -282,7 +356,10 @@ class PinConfigManager:
             mode=mode,
             device_type=device_type,
             device_id=device_id,
-            name=name,
+            name=pin_name,
+            default_name=pin_name if not name_customized else self._generate_fallback_name(gpio_number, device_type),
+            name_customized=name_customized,
+            customized_at=customized_at,
             enabled=True,
             pwm_frequency=pwm_frequency,
             config=config or {}
@@ -297,10 +374,97 @@ class PinConfigManager:
         
         return False
     
-    def unassign_pin(self, gpio_number: int) -> bool:
-        """Unassign a GPIO pin"""
+    def _generate_fallback_name(self, gpio_number: int, device_type: str) -> str:
+        """Generate a fallback smart default name if namer not available"""
+        physical_pin_map = {
+            2: 3, 3: 5, 4: 7, 5: 29, 6: 31,
+            7: 26, 8: 24, 9: 21, 10: 19, 11: 23,
+            12: 32, 13: 33, 14: 8, 15: 10, 16: 36,
+            17: 11, 18: 12, 19: 35, 20: 38, 21: 40,
+            22: 15, 23: 16, 24: 18, 25: 22, 26: 37,
+            27: 13,
+        }
+        physical_pin = physical_pin_map.get(gpio_number, '?')
+        return f"GPIO{gpio_number} (PIN{physical_pin}) - {device_type}"
+    
+    def rename_pin(self, gpio_number: int, new_name: str) -> bool:
+        """Rename a GPIO pin and mark it as user-customized.
+        
+        This marks the name as user-customized so future initializations
+        won't overwrite it.
+        
+        Args:
+            gpio_number: GPIO number to rename
+            new_name: New name for the pin
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not new_name or not new_name.strip():
+            print("❌ Name cannot be empty")
+            return False
         
         config = self.load_config()
+        if not config:
+            print("❌ No configuration found")
+            return False
+        
+        # Find the pin
+        for pin in config.pins:
+            if pin.gpio_number == gpio_number:
+                old_name = pin.name
+                pin.name = new_name.strip()
+                pin.name_customized = True
+                pin.customized_at = datetime.now().isoformat()
+                
+                if self.save_config(config):
+                    print(f"✅ GPIO{gpio_number} renamed: '{old_name}' → '{pin.name}' (marked as customized)")
+                    return True
+                return False
+        
+        print(f"❌ GPIO {gpio_number} not found")
+        return False
+    
+    def reset_pin_name(self, gpio_number: int) -> bool:
+        """Reset a GPIO pin name to smart default.
+        
+        Removes the custom name and regenerates based on GPIO+ capabilities.
+        
+        Args:
+            gpio_number: GPIO number
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        config = self.load_config()
+        if not config:
+            print("❌ No configuration found")
+            return False
+        
+        # Find the pin
+        for pin in config.pins:
+            if pin.gpio_number == gpio_number:
+                # Generate new smart default
+                old_name = pin.name
+                
+                if self.gpio_namer:
+                    pin.name = self.gpio_namer.generate_default_name(gpio_number, pin.device_type)
+                    pin.default_name = pin.name
+                else:
+                    pin.name = self._generate_fallback_name(gpio_number, pin.device_type)
+                    pin.default_name = pin.name
+                
+                pin.name_customized = False
+                pin.customized_at = None
+                
+                if self.save_config(config):
+                    print(f"✅ GPIO{gpio_number} name reset: '{old_name}' → '{pin.name}' (customization removed)")
+                    return True
+                return False
+        
+        print(f"❌ GPIO {gpio_number} not found")
+        return False
+    
         if not config:
             return False
         

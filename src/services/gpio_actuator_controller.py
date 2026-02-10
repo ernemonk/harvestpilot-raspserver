@@ -202,98 +202,86 @@ class GPIOActuatorController:
         return pins
     
     def _sync_initial_state_to_firestore(self):
-        """Register pins in Firestore on boot with smart naming.
+        """NON-DESTRUCTIVE boot sync: report hardware state, load webapp state.
         
-        CRITICAL: NEVER overwrites user-customized names!
+        EXISTING pins: ONLY update hardwareState + lastHardwareRead + mismatch.
+                        All other fields (name, state, enabled, schedules, etc.)
+                        are WEBAPP-OWNED and NEVER touched.
         
-        PI-OWNED fields (written every boot):
-          hardwareState, mismatch, lastHardwareRead, name, pin, mode
-          (but ONLY updates name if not user-customized)
-        
-        WEBAPP-OWNED fields (NEVER overwritten by Pi):
-          state, enabled
-        
-        SAFE PIN NAMING:
-          NEW pins:              Create with smart default name (GPIO + capabilities)
-          OLD user-customized:   PRESERVE (name_customized flag = true)
-          OLD default names:     CAN UPDATE to smarter default
+        NEW pins (not in Firestore yet): Create with sensible defaults so the
+                        webapp can discover them.
         """
         try:
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
             
-            # Read current Firestore state to avoid overwriting webapp fields
+            # Read current Firestore state
             doc = device_ref.get()
             existing_gpio = {}
             if doc.exists:
                 existing_gpio = doc.to_dict().get('gpioState', {})
             
             updates = {}
-            pins_preserved = 0
+            pins_existing = 0
             pins_created = 0
-            pins_updated = 0
             
             for pin, legacy_name in self._pin_names.items():
                 pin_str = str(pin)
                 existing_pin = existing_gpio.get(pin_str, {})
                 
-                # ──────────────────────────────────────────────────────────────
-                # SAFELY UPDATE PIN NAME (NON-DESTRUCTIVE)
-                # ──────────────────────────────────────────────────────────────
+                # Read actual hardware state (all pins are LOW after _initialize_hardware_pins)
+                hw_state = self._read_hardware_pin(pin)
+                if hw_state is None:
+                    hw_state = False
                 
-                # Try to get device type from config
-                device_type = self._infer_device_type_from_pin(pin)
-                
-                # Use name manager to determine what to do with the name
-                updated_pin_entry = self._name_manager.update_pin_with_smart_name(
-                    gpio_number=pin,
-                    existing_pin_data=existing_pin if existing_pin else None,
-                    device_type=device_type
-                )
-                
-                # Track what happened
-                if existing_pin and existing_pin.get('name_customized'):
-                    pins_preserved += 1
-                elif not existing_pin:
-                    pins_created += 1
-                else:
-                    pins_updated += 1
-                
-                # Update ALL pi-owned fields
-                updates[f'gpioState.{pin}.hardwareState'] = False
-                updates[f'gpioState.{pin}.mismatch'] = False
-                updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
-                updates[f'gpioState.{pin}.name'] = updated_pin_entry.get('name')
-                updates[f'gpioState.{pin}.default_name'] = updated_pin_entry.get('default_name')
-                updates[f'gpioState.{pin}.name_customized'] = updated_pin_entry.get('name_customized', False)
-                updates[f'gpioState.{pin}.pin'] = pin
-                updates[f'gpioState.{pin}.mode'] = 'output'
-                
-                # Copy over device_type if present
-                if 'device_type' in updated_pin_entry:
-                    updates[f'gpioState.{pin}.device_type'] = updated_pin_entry.get('device_type')
-                
-                # Copy over customization metadata if present
-                if 'customized_at' in updated_pin_entry:
-                    updates[f'gpioState.{pin}.customized_at'] = updated_pin_entry.get('customized_at')
-                
-                # Webapp-owned: only set defaults if pin doesn't exist yet
-                if not existing_pin:
-                    updates[f'gpioState.{pin}.state'] = False
-                    updates[f'gpioState.{pin}.enabled'] = True
-                else:
+                if existing_pin:
+                    # ── EXISTING PIN: only update Pi-owned hardware fields ──
+                    updates[f'gpioState.{pin}.hardwareState'] = hw_state
+                    updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+                    
                     # Load webapp's desired state into memory
                     webapp_state = existing_pin.get('state', False)
                     self._desired_states[pin] = webapp_state
                     self._last_firestore_state[pin] = webapp_state
+                    
+                    # Compute mismatch against webapp desired state
+                    updates[f'gpioState.{pin}.mismatch'] = webapp_state != hw_state
+                    
+                    pins_existing += 1
+                else:
+                    # ── NEW PIN: create with full defaults ──────────────────
+                    device_type = self._infer_device_type_from_pin(pin)
+                    
+                    updated_pin_entry = self._name_manager.update_pin_with_smart_name(
+                        gpio_number=pin,
+                        existing_pin_data=None,
+                        device_type=device_type
+                    )
+                    
+                    updates[f'gpioState.{pin}.hardwareState'] = hw_state
+                    updates[f'gpioState.{pin}.mismatch'] = False
+                    updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+                    updates[f'gpioState.{pin}.name'] = updated_pin_entry.get('name', legacy_name)
+                    updates[f'gpioState.{pin}.default_name'] = updated_pin_entry.get('default_name', legacy_name)
+                    updates[f'gpioState.{pin}.name_customized'] = False
+                    updates[f'gpioState.{pin}.pin'] = pin
+                    updates[f'gpioState.{pin}.mode'] = 'output'
+                    updates[f'gpioState.{pin}.state'] = False
+                    updates[f'gpioState.{pin}.enabled'] = True
+                    
+                    if device_type:
+                        updates[f'gpioState.{pin}.device_type'] = device_type
+                    
+                    pins_created += 1
+            
+            # Always update heartbeat so webapp knows Pi is alive
+            updates['lastHeartbeat'] = firestore.SERVER_TIMESTAMP
+            updates['status'] = 'online'
             
             device_ref.update(updates)
             
-            # Log summary
-            logger.info(f"✅ Registered {len(self._pins_initialized)} pins in Firestore")
-            logger.info(f"   ├─ Created (new): {pins_created}")
-            logger.info(f"   ├─ Updated (improved naming): {pins_updated}")
-            logger.info(f"   └─ Preserved (user-customized): {pins_preserved}")
-            logger.info(f"   Webapp fields (state, enabled) preserved")
+            logger.info(f"✅ Boot sync: {len(self._pin_names)} pins")
+            logger.info(f"   ├─ Existing (hardware state only): {pins_existing}")
+            logger.info(f"   └─ Created (new pins with defaults): {pins_created}")
             
         except Exception as e:
             logger.error(f"Failed to sync initial state: {e}")

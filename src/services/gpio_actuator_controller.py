@@ -348,6 +348,9 @@ class GPIOActuatorController:
     def _apply_to_hardware(self, bcm_pin: int, state: bool):
         """Set a GPIO pin HIGH or LOW on the PHYSICAL hardware.
         Then immediately read it back to verify.
+        
+        NO FIRESTORE WRITE HERE. The sync loop handles all Firestore writes
+        at the configured interval. This method only touches hardware + memory.
         """
         # Setup pin if not initialized
         if bcm_pin not in self._pins_initialized:
@@ -357,27 +360,20 @@ class GPIOActuatorController:
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
             GPIO.output(bcm_pin, GPIO.HIGH if state else GPIO.LOW)
         
-        # READ it back immediately to verify
+        # READ it back immediately to verify (in-memory only)
         hw_state = self._read_hardware_pin(bcm_pin)
         
         old = self._desired_states.get(bcm_pin)
         self._desired_states[bcm_pin] = state
         self._hardware_states[bcm_pin] = hw_state
         
-        # Check mismatch
+        # Check mismatch (log only, no Firestore write)
         mismatch = (state != hw_state) if hw_state is not None else False
         
         if mismatch:
             logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: desired={state} but hardware={hw_state}!")
         else:
             logger.info(f"✓ GPIO{bcm_pin}: {old} → {state} (hardware confirmed: {hw_state})")
-        
-        # Sync hardwareState to Firestore (non-blocking)
-        self._async_firestore_write({
-            f'gpioState.{bcm_pin}.hardwareState': hw_state if hw_state is not None else state,
-            f'gpioState.{bcm_pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
-            f'gpioState.{bcm_pin}.mismatch': mismatch,
-        })
         
         # Fire callbacks
         if bcm_pin in self._state_callbacks:

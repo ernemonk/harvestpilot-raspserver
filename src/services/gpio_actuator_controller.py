@@ -80,6 +80,19 @@ class GPIOActuatorController:
         self._hardware_states: Dict[int, bool] = {}        # What the pin ACTUALLY is (read from hardware)
         self._pin_names: Dict[int, str] = {}               # bcmPin -> human name
         
+        # Firestore state tracking (CRITICAL: separate from _desired_states)
+        # _last_firestore_state ONLY tracks what Firestore's `state` field says.
+        # Used by the state listener for REAL change detection.
+        # _desired_states gets clobbered by schedules; this dict does NOT.
+        self._last_firestore_state: Dict[int, bool] = {}
+        
+        # User override tracking — when user explicitly toggles a pin OFF
+        # while a schedule is running, the schedule should stop.
+        self._user_override_pins: set = set()
+        
+        # Simulation output tracking (for non-hardware environments)
+        self._simulated_output: Dict[int, bool] = {}
+        
         # Schedule management (CRITICAL: real-time listening + cache + execution)
         self._schedule_cache: ScheduleCache = get_schedule_cache()
         self._schedule_state_tracker: ScheduleStateTracker = get_schedule_state_tracker()
@@ -269,7 +282,9 @@ class GPIOActuatorController:
                     updates[f'gpioState.{pin}.enabled'] = True
                 else:
                     # Load webapp's desired state into memory
-                    self._desired_states[pin] = existing_pin.get('state', False)
+                    webapp_state = existing_pin.get('state', False)
+                    self._desired_states[pin] = webapp_state
+                    self._last_firestore_state[pin] = webapp_state
             
             device_ref.update(updates)
             
@@ -306,6 +321,16 @@ class GPIOActuatorController:
         
         return device_type
     
+    def _is_schedule_running_on_pin(self, pin: int) -> bool:
+        """Check if ANY schedule is actively running on a GPIO pin."""
+        if not self._schedule_cache:
+            return False
+        schedules = self._schedule_cache.get_pin_schedules(pin)
+        for sched in schedules:
+            if self._schedule_state_tracker.is_running(pin, sched.schedule_id):
+                return True
+        return False
+    
     # ──────────────────────────────────────────────────────────────────
     # REAL-TIME STATE LISTENER (Firestore → GPIO)
     # Firestore `state` is the DESIRED state. When it changes, apply it.
@@ -339,7 +364,7 @@ class GPIOActuatorController:
                         if not gpio_state:
                             continue
                         
-                        # On initial snapshot, just record desired states (don't re-apply)
+                        # On initial snapshot, just record states (don't re-apply)
                         if is_initial[0]:
                             is_initial[0] = False
                             for pin_str, pin_data in gpio_state.items():
@@ -348,35 +373,49 @@ class GPIOActuatorController:
                                     if isinstance(pin_data, dict):
                                         desired = pin_data.get('state', False)
                                         self._desired_states[pin] = desired
+                                        self._last_firestore_state[pin] = desired
                                 except (ValueError, TypeError):
                                     pass
                             logger.info(f"📡 Initial GPIO state loaded from Firestore ({len(gpio_state)} pins)")
                             return
                         
-                        # Process state changes
+                        # Process state changes — use _last_firestore_state for
+                        # change detection so schedules don't corrupt tracking
                         for pin_str, pin_data in gpio_state.items():
                             try:
                                 pin = int(pin_str)
                                 if not isinstance(pin_data, dict):
                                     continue
                                 
-                                desired_state = pin_data.get('state', False)
+                                firestore_state = pin_data.get('state', False)
                                 enabled = pin_data.get('enabled', True)
-                                old_desired = self._desired_states.get(pin)
+                                prev_firestore = self._last_firestore_state.get(pin)
                                 
-                                # Only act if the DESIRED state actually changed
-                                if desired_state != old_desired:
-                                    self._desired_states[pin] = desired_state
+                                # Detect REAL Firestore `state` change (webapp action)
+                                state_changed = (firestore_state != prev_firestore)
+                                
+                                if state_changed:
+                                    self._last_firestore_state[pin] = firestore_state
+                                    self._desired_states[pin] = firestore_state
                                     
                                     if not enabled:
                                         logger.warning(f"⚠️  GPIO{pin} state change ignored (enabled=false)")
                                         continue
                                     
-                                    logger.info(f"📡 FIRESTORE → GPIO{pin}: {old_desired} → {desired_state}")
+                                    logger.info(f"📡 FIRESTORE → GPIO{pin}: {prev_firestore} → {firestore_state}")
+                                    
+                                    # If user turned pin OFF while a schedule is running, cancel the schedule
+                                    if not firestore_state and self._is_schedule_running_on_pin(pin):
+                                        logger.info(f"🛑 User override: stopping schedules on GPIO{pin}")
+                                        self._user_override_pins.add(pin)
+                                    
+                                    # If user turned pin ON, clear any override
+                                    if firestore_state:
+                                        self._user_override_pins.discard(pin)
                                     
                                     # APPLY TO HARDWARE IMMEDIATELY
-                                    self._apply_to_hardware(pin, desired_state)
-                                    
+                                    self._apply_to_hardware(pin, firestore_state)
+                                
                             except (ValueError, TypeError) as e:
                                 logger.warning(f"Invalid pin key '{pin_str}': {e}")
                 
@@ -464,8 +503,8 @@ class GPIOActuatorController:
         
         Runs every 60 seconds to:
         - Check if any schedule has entered/exited its time window
-        - Stop running schedules that fell outside their window
-        - Start eligible schedules that entered their window
+        - Start eligible schedules that entered their window but aren't running
+        - Schedules that exit their window will self-stop (executor checks window each cycle)
         """
         def check_schedule_windows():
             while True:
@@ -474,7 +513,35 @@ class GPIOActuatorController:
                     
                     if self._schedule_listener:
                         self._schedule_listener.check_and_update_time_windows()
-                        logger.debug("✓ Time window check completed")
+                    
+                    # Re-trigger any active schedules that aren't currently running
+                    if self._schedule_cache:
+                        all_schedules = self._schedule_cache.get_all_schedules()
+                        for gpio_num, schedules in all_schedules.items():
+                            for sched in schedules:
+                                if sched.is_active and sched.enabled:
+                                    # Don't re-trigger if user overrode this pin
+                                    if gpio_num in self._user_override_pins:
+                                        continue
+                                    if not self._schedule_state_tracker.is_running(gpio_num, sched.schedule_id):
+                                        logger.info(f"⏰ Re-triggering schedule GPIO{gpio_num}/{sched.schedule_id} (in window but not running)")
+                                        # Build schedule_data from cached definition
+                                        schedule_data = {
+                                            'enabled': sched.enabled,
+                                            'startTime': sched.start_time,
+                                            'endTime': sched.end_time,
+                                            'durationSeconds': sched.duration_seconds,
+                                            'frequencySeconds': sched.interval_seconds,
+                                            'name': sched.description,
+                                        }
+                                        threading.Thread(
+                                            target=self._execute_schedule,
+                                            args=(gpio_num, sched.schedule_id, schedule_data),
+                                            daemon=True,
+                                            name=f"Schedule-{gpio_num}-{sched.schedule_id}"
+                                        ).start()
+                    
+                    logger.debug("✓ Time window check completed")
                     
                 except Exception as e:
                     logger.error(f"Error in schedule checker: {e}", exc_info=True)
@@ -491,9 +558,12 @@ class GPIOActuatorController:
         """Execute a schedule on the given GPIO pin.
         
         Handles webapp's schedule format:
-        - startTime/endTime: Time window (HH:MM format)
-        - durationSeconds: How long to run the on/off cycle
-        - frequencySeconds: Interval for toggling on/off
+        - startTime/endTime: Time window (HH:MM format) — schedule repeats within this window
+        - durationSeconds: How long to keep pin ON per cycle
+        - frequencySeconds: Total cycle length (ON + OFF time)
+        
+        Example: durationSeconds=2, frequencySeconds=3, startTime=00:48, endTime=00:54
+          → Turn ON for 2s, OFF for 1s, repeat until 00:54
         
         Args:
             pin: GPIO pin number
@@ -513,50 +583,83 @@ class GPIOActuatorController:
                 logger.info(f"⏸️  Schedule {schedule_name} on GPIO{pin} is disabled, skipping")
                 return
             
-            # Check if we're in the time window (supports overnight windows)
-            from datetime import datetime
-            now = datetime.now().strftime('%H:%M')
-            
-            if start_time and end_time:
+            def is_in_time_window():
+                """Check if current time is within the schedule's time window"""
+                from datetime import datetime
+                now = datetime.now().strftime('%H:%M')
+                if not start_time or not end_time:
+                    return True  # No time restriction
                 if start_time <= end_time:
-                    # Same-day window (e.g., 06:00 to 22:00)
-                    if not (start_time <= now <= end_time):
-                        logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside time window ({start_time}-{end_time}), skipping")
-                        return
+                    return start_time <= now <= end_time
                 else:
                     # Overnight window (e.g., 22:00 to 06:00)
-                    if not (now >= start_time or now <= end_time):
-                        logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside overnight window ({start_time}-{end_time}), skipping")
-                        return
+                    return now >= start_time or now <= end_time
+            
+            # Initial time window check
+            if not is_in_time_window():
+                logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside time window ({start_time}-{end_time}), skipping")
+                return
             
             with self._schedule_execution_lock:
+                # Don't start if already running
+                if self._schedule_state_tracker.is_running(pin, schedule_id):
+                    logger.debug(f"⏭️  Schedule {schedule_name} on GPIO{pin} already running, skipping")
+                    return
                 self._schedule_state_tracker.mark_running(pin, schedule_id)
             
-            logger.info(f"▶️  Executing '{schedule_name}' on GPIO{pin}: {duration_seconds}s window, toggle every {frequency_seconds}s")
+            logger.info(f"▶️  Executing '{schedule_name}' on GPIO{pin}: ON for {duration_seconds}s every {frequency_seconds}s (window: {start_time}-{end_time})")
             
-            # Toggle the pin on/off for the specified duration
-            start = time.time()
-            is_on = False
+            # Ensure OFF time exists (frequency must be > duration)
+            off_time = max(0, frequency_seconds - duration_seconds)
+            cycle_count = 0
             
-            while (time.time() - start) < duration_seconds:
-                # Toggle state
-                is_on = not is_on
-                self._apply_to_hardware(pin, is_on)
-                logger.debug(f"   GPIO{pin}: {'ON' if is_on else 'OFF'}")
+            # Repeat ON/OFF cycles within the time window
+            while is_in_time_window():
+                # Re-check if schedule is still enabled (could be modified while running)
+                cached = self._schedule_cache.get_schedule(pin, schedule_id)
+                if cached and not cached.enabled:
+                    logger.info(f"⏸️  Schedule {schedule_name} on GPIO{pin} disabled mid-execution, stopping")
+                    break
                 
-                # Sleep for the frequency interval
-                time.sleep(frequency_seconds)
+                # Check if user manually overrode this pin (toggled OFF from webapp)
+                if pin in self._user_override_pins:
+                    logger.info(f"🛑 Schedule {schedule_name} on GPIO{pin} stopped by user override")
+                    break
+                
+                cycle_count += 1
+                
+                # ON phase
+                self._apply_to_hardware(pin, True)
+                logger.debug(f"   GPIO{pin}: ON (cycle {cycle_count}, {duration_seconds}s)")
+                
+                # Sleep for duration (ON time), checking time window periodically
+                on_remaining = duration_seconds
+                while on_remaining > 0 and is_in_time_window():
+                    sleep_chunk = min(on_remaining, 1.0)  # Check every second
+                    time.sleep(sleep_chunk)
+                    on_remaining -= sleep_chunk
+                
+                if not is_in_time_window():
+                    break
+                
+                # OFF phase
+                self._apply_to_hardware(pin, False)
+                logger.debug(f"   GPIO{pin}: OFF (cycle {cycle_count}, {off_time}s)")
+                
+                # Sleep for off time, checking time window periodically
+                off_remaining = off_time
+                while off_remaining > 0 and is_in_time_window():
+                    sleep_chunk = min(off_remaining, 1.0)
+                    time.sleep(sleep_chunk)
+                    off_remaining -= sleep_chunk
             
-            # Ensure pin is OFF at the end
+            # Ensure pin is OFF when schedule ends
             self._apply_to_hardware(pin, False)
-            logger.info(f"✓ Schedule '{schedule_name}' on GPIO{pin} completed")
-            
-            with self._schedule_execution_lock:
-                self._schedule_state_tracker.mark_stopped(pin, schedule_id)
+            logger.info(f"✓ Schedule '{schedule_name}' on GPIO{pin} completed ({cycle_count} cycles)")
             
             # Update Firestore with last run time
             with self._schedule_execution_lock:
-                self._schedule_state_tracker.update_last_run(pin, schedule_id)
+                self._schedule_state_tracker.update_last_run(pin, schedule_id, datetime.now())
             
             self._async_firestore_write({
                 f'gpioState.{pin}.schedules.{schedule_id}.last_run_at': firestore.SERVER_TIMESTAMP,
@@ -565,6 +668,11 @@ class GPIOActuatorController:
         except Exception as e:
             logger.error(f"Error executing schedule {schedule_id} on GPIO{pin}: {e}", exc_info=True)
         finally:
+            # Always ensure pin is OFF and mark stopped
+            try:
+                self._apply_to_hardware(pin, False)
+            except Exception:
+                pass
             with self._schedule_execution_lock:
                 self._schedule_state_tracker.mark_stopped(pin, schedule_id)
     
@@ -579,6 +687,17 @@ class GPIOActuatorController:
         
         if cmd_type == 'pin_control' and pin and action in ('on', 'off'):
             state = action == 'on'
+            
+            # Update state tracking (commands are explicit user actions)
+            self._desired_states[pin] = state
+            self._last_firestore_state[pin] = state
+            
+            # If user is turning OFF while schedule is running, override it
+            if not state and self._is_schedule_running_on_pin(pin):
+                self._user_override_pins.add(pin)
+                logger.info(f"🛑 Command: user override on GPIO{pin}, stopping schedules")
+            if state:
+                self._user_override_pins.discard(pin)
             
             # 1. Apply to hardware IMMEDIATELY
             self._apply_to_hardware(pin, state)
@@ -616,6 +735,10 @@ class GPIOActuatorController:
         """Set a GPIO pin HIGH or LOW on the PHYSICAL hardware.
         Then immediately read it back to verify.
         
+        CRITICAL: This method does NOT modify _desired_states or _last_firestore_state.
+        Those are ONLY set by the state listener (reflecting Firestore's `state` field).
+        This prevents schedules from corrupting the change detection.
+        
         NO FIRESTORE WRITE HERE. The sync loop handles all Firestore writes
         at the configured interval. This method only touches hardware + memory.
         """
@@ -626,21 +749,21 @@ class GPIOActuatorController:
         # SET the pin
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
             GPIO.output(bcm_pin, GPIO.HIGH if state else GPIO.LOW)
+        else:
+            self._simulated_output[bcm_pin] = state
         
         # READ it back immediately to verify (in-memory only)
         hw_state = self._read_hardware_pin(bcm_pin)
         
-        old = self._desired_states.get(bcm_pin)
-        self._desired_states[bcm_pin] = state
         self._hardware_states[bcm_pin] = hw_state
         
         # Check mismatch (log only, no Firestore write)
         mismatch = (state != hw_state) if hw_state is not None else False
         
         if mismatch:
-            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: desired={state} but hardware={hw_state}!")
+            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: set={state} but hardware={hw_state}!")
         else:
-            logger.info(f"✓ GPIO{bcm_pin}: {old} → {state} (hardware confirmed: {hw_state})")
+            logger.info(f"✓ GPIO{bcm_pin} → {state} (hardware confirmed: {hw_state})")
         
         # Fire callbacks
         if bcm_pin in self._state_callbacks:
@@ -657,8 +780,8 @@ class GPIOActuatorController:
         """
         try:
             if not GPIO_AVAILABLE or config.SIMULATE_HARDWARE:
-                # In simulation, return what we set
-                return self._desired_states.get(bcm_pin, False)
+                # In simulation, return what we last set via _apply_to_hardware
+                return self._simulated_output.get(bcm_pin, False)
             
             # For output pins: read the actual level
             # GPIO.input() works on output pins too on RPi - returns current output level
@@ -736,7 +859,13 @@ class GPIOActuatorController:
                     
                     if mismatches:
                         for pin, desired, actual in mismatches:
-                            logger.error(f"🚨 MISMATCH GPIO{pin}: desired={desired}, hardware={actual}")
+                            # Auto-fix: if no schedule is actively controlling this pin,
+                            # re-apply the desired state. This resolves stuck pins.
+                            if not self._is_schedule_running_on_pin(pin):
+                                logger.warning(f"🔧 AUTO-FIX GPIO{pin}: desired={desired} but hardware={actual}, re-applying")
+                                self._apply_to_hardware(pin, desired)
+                            else:
+                                logger.debug(f"⏳ GPIO{pin}: mismatch (desired={desired}, hw={actual}) expected — schedule active")
                     else:
                         logger.debug(f"🔄 Local read: {len(self._pins_initialized)} pins OK")
                     
@@ -759,10 +888,13 @@ class GPIOActuatorController:
                             updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
                         
                         if updates:
+                            # Include heartbeat in the same write — saves a separate Firestore call
+                            updates['lastHeartbeat'] = firestore.SERVER_TIMESTAMP
+                            updates['status'] = 'online'
                             try:
                                 device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
                                 device_ref.update(updates)
-                                logger.info(f"📤 Firestore sync: {len(self._pins_initialized)} pins written (next in {sync_interval}s)")
+                                logger.info(f"📤 Firestore sync + heartbeat: {len(self._pins_initialized)} pins written (next in {sync_interval}s)")
                             except Exception as e:
                                 logger.error(f"Hardware sync Firestore write failed: {e}")
                 
@@ -803,6 +935,8 @@ class GPIOActuatorController:
     
     def set_pin(self, bcm_pin: int, state: bool):
         """Manually set a pin state and sync to Firestore"""
+        self._desired_states[bcm_pin] = state
+        self._last_firestore_state[bcm_pin] = state
         self._apply_to_hardware(bcm_pin, state)
         self._async_firestore_write({
             f'gpioState.{bcm_pin}.state': state,

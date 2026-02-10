@@ -116,12 +116,16 @@ class RaspServer:
             # Start all background tasks
             self.running = True
             
-            tasks = [
-                self._heartbeat_loop(),         # Keep-alive signal to Firebase every 30s
-            ]
+            tasks = []
+            # Heartbeat is now handled inside gpio_actuator's hardware sync loop
+            # (merged into the same Firestore write to save ~2880 writes/day)
             
             if config.AUTO_IRRIGATION_ENABLED or config.AUTO_LIGHTING_ENABLED:
                 tasks.append(self.automation.run_automation_loop())
+            
+            # Keep server alive — all real work happens in daemon threads
+            # (GPIO listener, hardware sync, schedule checker, config listener)
+            tasks.append(self._keep_alive())
             
             # Run all tasks concurrently
             await asyncio.gather(*tasks)
@@ -162,33 +166,21 @@ class RaspServer:
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
     
-    async def _heartbeat_loop(self):
-        """Send periodic heartbeat to Firebase to keep device online (dynamic interval from ConfigManager)"""
-        logger.info("🎯 Starting heartbeat loop")
-        heartbeat_count = 0
-        
+    async def _keep_alive(self):
+        """Keep the asyncio event loop alive while daemon threads do the real work."""
+        logger.info("🎯 Server running — all listeners active")
         while self.running:
             try:
-                interval = self.config_manager.get_heartbeat_interval()
-                await asyncio.sleep(interval)  # Dynamic interval from ConfigManager
-                
-                # Publish heartbeat to Firebase (keeps device status as "online")
-                try:
-                    self.firebase.publish_heartbeat()
-                    heartbeat_count += 1
-                    self.diagnostics.record_heartbeat()
-                    logger.info(f"💓 Heartbeat #{heartbeat_count} sent successfully")
-                except Exception as hb_error:
-                    logger.error(f"💔 Heartbeat failed: {hb_error}", exc_info=True)
-                    self.diagnostics.record_error('firebase')
-                
+                await asyncio.sleep(60)
             except asyncio.CancelledError:
-                logger.info("Heartbeat loop cancelled")
                 break
-            except Exception as e:
-                logger.error(f"❌ Error in heartbeat loop: {e}", exc_info=True)
-                self.diagnostics.record_error('firebase')
-                await asyncio.sleep(5)
+    
+    async def _heartbeat_loop(self):
+        """DEPRECATED: Heartbeat is now merged into gpio_actuator's hardware sync loop.
+        Kept for backwards compatibility but should not be called."""
+        logger.warning("⚠️ _heartbeat_loop called but heartbeat is now in hardware sync loop")
+        while self.running:
+            await asyncio.sleep(60)
     
     async def _emergency_stop(self):
         """Stop all operations immediately"""

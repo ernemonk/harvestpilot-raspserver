@@ -175,13 +175,6 @@ class RaspServer:
             except asyncio.CancelledError:
                 break
     
-    async def _heartbeat_loop(self):
-        """DEPRECATED: Heartbeat is now merged into gpio_actuator's hardware sync loop.
-        Kept for backwards compatibility but should not be called."""
-        logger.warning("⚠️ _heartbeat_loop called but heartbeat is now in hardware sync loop")
-        while self.running:
-            await asyncio.sleep(60)
-    
     async def _emergency_stop(self):
         """Stop all operations immediately"""
         logger.warning("EMERGENCY STOP ACTIVATED")

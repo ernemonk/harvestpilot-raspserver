@@ -415,6 +415,15 @@ class GPIOActuatorController:
                                     
                                     # APPLY TO HARDWARE IMMEDIATELY
                                     self._apply_to_hardware(pin, firestore_state)
+                                    
+                                    # Write hardwareState IMMEDIATELY so webapp sees instant feedback
+                                    # (don't wait for the 30s sync loop)
+                                    self._hardware_states[pin] = firestore_state
+                                    self._async_firestore_write({
+                                        f'gpioState.{pin}.hardwareState': firestore_state,
+                                        f'gpioState.{pin}.mismatch': False,
+                                        f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+                                    })
                                 
                             except (ValueError, TypeError) as e:
                                 logger.warning(f"Invalid pin key '{pin_str}': {e}")
@@ -630,6 +639,13 @@ class GPIOActuatorController:
                 
                 # ON phase
                 self._apply_to_hardware(pin, True)
+                self._hardware_states[pin] = True
+                # Write hardwareState on first cycle for instant UI feedback
+                if cycle_count == 1:
+                    self._async_firestore_write({
+                        f'gpioState.{pin}.hardwareState': True,
+                        f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+                    })
                 logger.debug(f"   GPIO{pin}: ON (cycle {cycle_count}, {duration_seconds}s)")
                 
                 # Sleep for duration (ON time), checking time window periodically
@@ -655,14 +671,18 @@ class GPIOActuatorController:
             
             # Ensure pin is OFF when schedule ends
             self._apply_to_hardware(pin, False)
+            self._hardware_states[pin] = False
             logger.info(f"✓ Schedule '{schedule_name}' on GPIO{pin} completed ({cycle_count} cycles)")
             
-            # Update Firestore with last run time
+            # Update Firestore with last run time + final hardwareState
             with self._schedule_execution_lock:
                 self._schedule_state_tracker.update_last_run(pin, schedule_id, datetime.now())
             
             self._async_firestore_write({
                 f'gpioState.{pin}.schedules.{schedule_id}.last_run_at': firestore.SERVER_TIMESTAMP,
+                f'gpioState.{pin}.hardwareState': False,
+                f'gpioState.{pin}.mismatch': False,
+                f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
             })
             
         except Exception as e:
@@ -701,11 +721,16 @@ class GPIOActuatorController:
             
             # 1. Apply to hardware IMMEDIATELY
             self._apply_to_hardware(pin, state)
+            self._hardware_states[pin] = state
             
-            # 2. Update desired state in Firestore (async)
+            # 2. Update desired state AND hardwareState in Firestore (async)
+            # Writing hardwareState immediately gives instant UI feedback
             self._async_firestore_write({
                 f'gpioState.{pin}.state': state,
+                f'gpioState.{pin}.hardwareState': state,
+                f'gpioState.{pin}.mismatch': False,
                 f'gpioState.{pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+                f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
             })
             
             # 3. Auto-off if duration specified
@@ -713,9 +738,13 @@ class GPIOActuatorController:
                 def auto_off():
                     time.sleep(duration)
                     self._apply_to_hardware(pin, False)
+                    self._hardware_states[pin] = False
                     self._async_firestore_write({
                         f'gpioState.{pin}.state': False,
+                        f'gpioState.{pin}.hardwareState': False,
+                        f'gpioState.{pin}.mismatch': False,
                         f'gpioState.{pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+                        f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
                     })
                     logger.info(f"✓ GPIO{pin} auto-OFF after {duration}s")
                 threading.Thread(target=auto_off, daemon=True).start()

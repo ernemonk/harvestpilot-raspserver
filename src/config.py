@@ -89,12 +89,13 @@ LED_PWM_PIN = 18  # GPIO 18 (Physical Pin 12) - LED strip MOSFET (PWM brightness
 LED_RELAY_PIN = 13
 
 # Harvest belt motors (6 trays)
+# FIXED: Removed conflicting pins (17 used by Pump, 18 by LED, 1 is invalid)
 MOTOR_PINS = [
-    {"tray": 1, "pwm": 2, "dir": 3, "home": 17, "end": 27},
+    {"tray": 1, "pwm": 2, "dir": 3, "home": 4, "end": 27},      # Changed home from 17→4
     {"tray": 2, "pwm": 9, "dir": 11, "home": 5, "end": 6},
     {"tray": 3, "pwm": 10, "dir": 22, "home": 23, "end": 24},
-    {"tray": 4, "pwm": 14, "dir": 15, "home": 18, "end": 25},
-    {"tray": 5, "pwm": 8, "dir": 7, "home": 1, "end": 12},
+    {"tray": 4, "pwm": 14, "dir": 15, "home": 28, "end": 25},    # Changed home from 18→28
+    {"tray": 5, "pwm": 8, "dir": 7, "home": 29, "end": 12},      # Changed home from 1→29
     {"tray": 6, "pwm": 16, "dir": 20, "home": 21, "end": 26},
 ]
 

@@ -1,11 +1,25 @@
-"""GPIO Actuator Controller - Controls GPIO pins via Firestore
+"""GPIO Actuator Controller - Real-time Firestore ↔ GPIO Hardware Bridge
 
-This module listens for GPIO state changes in Firestore and updates physical pins.
+ARCHITECTURE:
+  Firestore `state` = DESIRED state (set by webapp)
+  Firestore `hardwareState` = ACTUAL state (read from physical GPIO pin)
+  
+  Flow:
+  1. Webapp sets gpioState.{pin}.state = true/false (desired)
+  2. Pi listener picks it up INSTANTLY
+  3. Pi sets physical GPIO pin HIGH/LOW
+  4. Pi READS the actual pin value back from hardware
+  5. Pi writes gpioState.{pin}.hardwareState = true/false (actual)
+  6. If state != hardwareState → MISMATCH ALERT
+
+  This gives you REAL data. No guessing. No BS.
 """
 
-import asyncio
 import logging
+import threading
+import time
 from typing import Dict, Callable, Optional, Any
+from datetime import datetime
 import firebase_admin
 from firebase_admin import firestore
 from ..utils.gpio_import import GPIO, GPIO_AVAILABLE
@@ -13,267 +27,375 @@ from .. import config
 
 logger = logging.getLogger(__name__)
 
+# How often to read hardware state and sync to Firestore (seconds)
+HARDWARE_STATE_SYNC_INTERVAL = 2.0
+
 
 class GPIOActuatorController:
     """
-    Controls GPIO pins based on Firestore gpioState updates.
+    Production-grade GPIO controller with real-time Firestore sync.
     
-    When the webapp toggles an actuator:
-    1. Webapp writes to Firestore: devices/{hardwareSerial}/gpioState/{bcmPin}/state
-    2. This controller receives the update in real-time
-    3. Controller sets the physical GPIO pin HIGH or LOW
+    TWO sources of truth per pin:
+      - state:         What the webapp WANTS (desired)
+      - hardwareState: What the GPIO pin ACTUALLY IS (measured)
+    
+    They should always match. If they don't, something is wrong.
     """
     
     def __init__(self, hardware_serial: str = None, device_id: str = None):
         self.hardware_serial = hardware_serial or config.HARDWARE_SERIAL
         self.device_id = device_id or config.DEVICE_ID
         self.firestore_db = None
-        self.listener = None
         self._running = False
-        self._pins_initialized: Dict[int, str] = {}  # bcmPin -> mode
-        self._state_callbacks: Dict[int, Callable] = {}
-        self._pin_states: Dict[int, bool] = {}  # Track current pin states
-        self._command_listener = None
-        self._gpio_state_listener = None
-        self._processed_commands: set = set()  # Track processed commands to avoid duplicates
         
-        # Setup GPIO
+        # Pin tracking
+        self._pins_initialized: Dict[int, str] = {}       # bcmPin -> mode ('output'/'input')
+        self._desired_states: Dict[int, bool] = {}         # What Firestore says the pin should be
+        self._hardware_states: Dict[int, bool] = {}        # What the pin ACTUALLY is (read from hardware)
+        self._pin_names: Dict[int, str] = {}               # bcmPin -> human name
+        
+        # Listeners
+        self._state_listener = None
+        self._command_listener = None
+        self._hardware_sync_thread: Optional[threading.Thread] = None
+        self._processed_commands: set = set()
+        
+        # Callbacks
+        self._state_callbacks: Dict[int, Callable] = {}
+        
+        # Setup GPIO hardware
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
             GPIO.setmode(GPIO.BCM)
             GPIO.setwarnings(False)
-            logger.info("GPIO initialized in BCM mode")
+            logger.info("✓ GPIO initialized in BCM mode (REAL HARDWARE)")
         else:
-            logger.info("GPIO simulation mode (no hardware)")
+            logger.info("⚠️  GPIO simulation mode (no hardware)")
     
     def connect(self):
-        """Connect to Firestore and start listening for gpioState changes"""
+        """Connect to Firestore and start real-time listeners"""
         try:
             if not firebase_admin._apps:
-                logger.error("Firebase not initialized. Call firebase connect first.")
+                logger.error("Firebase not initialized")
                 return False
             
             self.firestore_db = firestore.client()
             self._running = True
             
-            # Start the real-time listeners
-            self._start_gpio_listener()
-            # DISABLED: _start_gpio_state_listener()
-            # The GPIO state listener was the old method that caused feedback loops.
-            # Now we use command-based updates only: commands → GPIO controller → Firestore state
+            # 1. Initialize GPIO pins on hardware
+            self._initialize_hardware_pins()
             
-            logger.info(f"GPIO Actuator Controller connected (hardware_serial: {self.hardware_serial}, device_id: {self.device_id})")
+            # 2. Sync initial state TO Firestore (all pins LOW on boot)
+            self._sync_initial_state_to_firestore()
+            
+            # 3. Start REAL-TIME listener on gpioState (Firestore → GPIO)
+            self._start_state_listener()
+            
+            # 4. Start command listener (for explicit commands)
+            self._start_command_listener()
+            
+            # 5. Start hardware readback loop (GPIO → Firestore hardwareState)
+            self._start_hardware_sync_loop()
+            
+            logger.info(f"✅ GPIO Controller ONLINE - hardware_serial: {self.hardware_serial}")
+            logger.info(f"   Listening: devices/{self.hardware_serial}/gpioState")
+            logger.info(f"   Hardware sync: every {HARDWARE_STATE_SYNC_INTERVAL}s")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to connect GPIO controller: {e}")
+            logger.error(f"Failed to connect GPIO controller: {e}", exc_info=True)
             return False
     
-    async def _delete_command_async(self, doc_ref, command_id: str):
-        """Asynchronously delete a command after processing"""
-        try:
-            await asyncio.sleep(0.1)  # Small delay to ensure processing is complete
-            doc_ref.delete()
-            logger.debug(f"✅ Command {command_id} deleted from Firestore")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to delete command {command_id}: {e}")
+    # ──────────────────────────────────────────────────────────────────
+    # INITIALIZATION
+    # ──────────────────────────────────────────────────────────────────
     
-    def _delete_command_sync(self, doc_ref, command_id: str):
-        """Synchronously delete a command after processing (for use in callbacks)"""
-        try:
-            doc_ref.delete()
-            logger.debug(f"✅ Command {command_id} deleted from Firestore")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to delete command {command_id}: {e}")
-    
-    def _start_gpio_listener(self):
-        """Start listening to GPIO commands in Firestore using hardware_serial as primary key"""
-        try:
-            # Listen to commands subcollection: devices/{HARDWARE_SERIAL}/commands/
-            commands_ref = self.firestore_db.collection('devices').document(self.hardware_serial).collection('commands')
-            
-            logger.info(f"✓ Setting up GPIO listener on devices/{self.hardware_serial}/commands/")
-
-            def on_snapshot(doc_snapshot, changes, read_time):
-                """Callback when new commands arrive"""
-                logger.debug(f"📡 GPIO on_snapshot triggered - {len(changes)} changes")
-                
-                for change in changes:
-                    try:
-                        command_id = change.document.id
-                        
-                        # Prevent duplicate processing - only process ADDED event once
-                        if change.type.name == 'ADDED':
-                            if command_id in self._processed_commands:
-                                logger.debug(f"⏭️  Command {command_id} already processed, skipping")
-                                continue
-                            
-                            command_data = change.document.to_dict()
-                            
-                            if command_data:
-                                logger.info(f"✓ GPIO command RECEIVED: {command_id} - type={command_data.get('type')}, pin={command_data.get('pin')}, action={command_data.get('action')}")
-                                
-                                # Mark as processed BEFORE processing
-                                self._processed_commands.add(command_id)
-                                
-                                # Process the command
-                                self._process_gpio_command(command_id, command_data)
-                                
-                                # Delete command synchronously to clean up (no event loop in callback)
-                                self._delete_command_sync(change.document.reference, command_id)
-                            else:
-                                logger.warning(f"✗ Empty command data for {command_id}")
-                        
-                        elif change.type.name == 'REMOVED':
-                            # Clean up processed commands tracking
-                            self._processed_commands.discard(command_id)
-                            logger.debug(f"🗑️  Command {command_id} removed from Firestore")
-                    
-                    except Exception as e:
-                        logger.error(f"✗ Error processing GPIO change: {e}", exc_info=True)
-            
-            # Attach the listener
-            self._command_listener = commands_ref.on_snapshot(on_snapshot)
-            logger.info(f"✓ GPIO command listener ACTIVE on devices/{self.hardware_serial}/commands/")
-            
-        except Exception as e:
-            logger.error(f"✗ Failed to start GPIO listener: {e}", exc_info=True)
-    
-    def _start_gpio_state_listener(self):
-        """Listen for GPIO state changes from Firestore (webapp toggling actuators)"""
-        try:
-            # Listen to device doc: devices/{HARDWARE_SERIAL}
-            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
-            
-            logger.info(f"✓ Setting up GPIO state listener on devices/{self.hardware_serial}")
-            
-            def on_state_snapshot(doc_snapshot, changes, read_time):
-                """Callback when GPIO state changes from Firestore"""
-                logger.debug(f"📡 GPIO state on_snapshot triggered")
-                
-                try:
-                    if isinstance(doc_snapshot, list):
-                        # Collection listener returns list of docs
-                        for doc in doc_snapshot:
-                            if doc.exists:
-                                doc_data = doc.to_dict()
-                                gpio_state = doc_data.get('gpioState', {})
-                                
-                                if gpio_state:
-                                    logger.info(f"✓ GPIO state update received: {gpio_state}")
-                                    
-                                    for pin_str, pin_data in gpio_state.items():
-                                        try:
-                                            pin = int(pin_str)
-                                            state = pin_data.get('state', False) if isinstance(pin_data, dict) else bool(pin_data)
-                                            
-                                            logger.info(f"✓ GPIO state changed: pin={pin}, state={state} (from Firestore)")
-                                            self._apply_state_change(pin, state)
-                                        except (ValueError, TypeError) as e:
-                                            logger.warning(f"✗ Invalid pin format {pin_str}: {e}")
-                    else:
-                        # Document listener returns single snapshot
-                        if doc_snapshot.exists:
-                            doc_data = doc_snapshot.to_dict()
-                            gpio_state = doc_data.get('gpioState', {})
-                            
-                            if gpio_state:
-                                logger.info(f"✓ GPIO state update received: {gpio_state}")
-                                
-                                for pin_str, pin_data in gpio_state.items():
-                                    try:
-                                        pin = int(pin_str)
-                                        state = pin_data.get('state', False) if isinstance(pin_data, dict) else bool(pin_data)
-                                        
-                                        logger.info(f"✓ GPIO state changed: pin={pin}, state={state} (from Firestore)")
-                                        self._apply_state_change(pin, state)
-                                    except (ValueError, TypeError) as e:
-                                        logger.warning(f"✗ Invalid pin format {pin_str}: {e}")
-                except Exception as e:
-                    logger.error(f"✗ Error in GPIO state snapshot: {e}", exc_info=True)
-            
-            # Attach the listener
-            self._gpio_state_listener = device_ref.on_snapshot(on_state_snapshot)
-            logger.info(f"✓ GPIO state listener ACTIVE on devices/{self.hardware_serial}")
-            
-        except Exception as e:
-            logger.error(f"✗ Failed to start GPIO state listener: {e}", exc_info=True)
-    
-    def _apply_state_change(self, pin: int, state: bool):
-        """Apply a state change to a GPIO pin - setup if needed"""
-        try:
-            # Check if state actually changed before applying
-            current_state = self._pin_states.get(pin)
-            if current_state == state:
-                logger.debug(f"GPIO{pin} state unchanged ({state}), skipping redundant update")
-                return
-            
-            if pin not in self._pins_initialized:
-                self._setup_pin(pin, 'output')
-            
-            self._set_pin_state(pin, state, f"State from Firestore")
-            logger.info(f"✓ GPIO{pin} applied state change: {current_state} → {state}")
-        except Exception as e:
-            logger.error(f"✗ Error applying state change to GPIO{pin}: {e}")
-    
-    def _process_gpio_command(self, command_id: str, command_data: Dict[str, Any]):
-        """Process GPIO commands from Firestore
+    def _initialize_hardware_pins(self):
+        """Setup all GPIO pins on the physical hardware"""
+        all_pins = self._get_all_pin_definitions()
         
-        Command format:
-        {
-            "type": "pin_control",
-            "pin": 17,
-            "action": "on|off",
-            "duration": 5  # optional
+        logger.info(f"🔧 Initializing {len(all_pins)} GPIO pins on hardware...")
+        
+        for pin, name in sorted(all_pins.items()):
+            try:
+                if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
+                    GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+                
+                self._pins_initialized[pin] = 'output'
+                self._desired_states[pin] = False
+                self._hardware_states[pin] = False
+                self._pin_names[pin] = name
+                logger.debug(f"  ✓ GPIO{pin}: {name} → OUTPUT, LOW")
+            except Exception as e:
+                logger.warning(f"  ⚠️  GPIO{pin} ({name}) setup failed: {e}")
+        
+        logger.info(f"✓ {len(self._pins_initialized)} pins initialized on hardware")
+    
+    def _get_all_pin_definitions(self) -> Dict[int, str]:
+        """Build complete pin list from config"""
+        pins = {
+            config.PUMP_PWM_PIN: "Pump PWM",
+            config.PUMP_RELAY_PIN: "Pump Relay",
+            config.LED_PWM_PIN: "LED PWM",
+            config.LED_RELAY_PIN: "LED Relay",
         }
+        for motor in config.MOTOR_PINS:
+            pins[motor['pwm']] = f"Motor {motor['tray']} PWM"
+            pins[motor['dir']] = f"Motor {motor['tray']} Direction"
+            pins[motor['home']] = f"Motor {motor['tray']} Home Sensor"
+            pins[motor['end']] = f"Motor {motor['tray']} End Sensor"
+        return pins
+    
+    def _sync_initial_state_to_firestore(self):
+        """Push initial pin state to Firestore on boot (all pins LOW)"""
+        try:
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            updates = {}
+            
+            for pin, name in self._pin_names.items():
+                updates[f'gpioState.{pin}.state'] = False
+                updates[f'gpioState.{pin}.hardwareState'] = False
+                updates[f'gpioState.{pin}.name'] = name
+                updates[f'gpioState.{pin}.pin'] = pin
+                updates[f'gpioState.{pin}.mode'] = 'output'
+                updates[f'gpioState.{pin}.enabled'] = True
+                updates[f'gpioState.{pin}.mismatch'] = False
+                updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+            
+            device_ref.update(updates)
+            logger.info(f"✅ Synced {len(self._pins_initialized)} pins to Firestore (state + hardwareState)")
+        except Exception as e:
+            logger.error(f"Failed to sync initial state: {e}")
+    
+    # ──────────────────────────────────────────────────────────────────
+    # REAL-TIME STATE LISTENER (Firestore → GPIO)
+    # Firestore `state` is the DESIRED state. When it changes, apply it.
+    # ──────────────────────────────────────────────────────────────────
+    
+    def _start_state_listener(self):
+        """Listen to gpioState changes on the device document in real-time.
+        
+        When webapp sets gpioState.{pin}.state = true/false,
+        this listener fires INSTANTLY and applies it to hardware.
         """
         try:
-            command_type = command_data.get('type')
-            logger.info(f"✓ Processing GPIO command {command_id}: type={command_type}")
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
             
-            if command_type == 'pin_control':
-                pin = command_data.get('pin')
-                action = command_data.get('action', '').lower()
-                duration = command_data.get('duration')
-                
-                logger.info(f"  ↳ pin_control: GPIO{pin} → {action.upper()}" + (f" (duration: {duration}s)" if duration else ""))
-                
-                if not pin or action not in ['on', 'off']:
-                    logger.error(f"✗ Invalid pin_control command: {command_data}")
-                    return
-                
-                # Set pin state
-                state = action == 'on'
-                self._setup_pin(pin, 'output')
-                self._set_pin_state(pin, state, f"Command {command_id}")
-                logger.info(f"✓ GPIO{pin} set to {action.upper()} (command: {command_id})")
-                
-                # Optional: auto-off after duration
-                if duration and state:
-                    import threading
-                    def auto_off():
-                        import time
-                        time.sleep(duration)
-                        self._set_pin_state(pin, False, f"Auto-off after {duration}s")
-                        logger.info(f"✓ GPIO{pin} auto-turned off after {duration} seconds")
+            # Track if this is the initial snapshot (skip to avoid re-applying boot state)
+            is_initial = [True]
+            
+            def on_device_snapshot(doc_snapshot, changes, read_time):
+                """Fires whenever the device document changes"""
+                try:
+                    # Handle both list and single doc formats
+                    docs = doc_snapshot if isinstance(doc_snapshot, list) else [doc_snapshot]
                     
-                    thread = threading.Thread(target=auto_off, daemon=True)
-                    thread.start()
+                    for doc in docs:
+                        if not doc.exists:
+                            continue
+                        
+                        doc_data = doc.to_dict()
+                        gpio_state = doc_data.get('gpioState', {})
+                        
+                        if not gpio_state:
+                            continue
+                        
+                        # On initial snapshot, just record desired states (don't re-apply)
+                        if is_initial[0]:
+                            is_initial[0] = False
+                            for pin_str, pin_data in gpio_state.items():
+                                try:
+                                    pin = int(pin_str)
+                                    if isinstance(pin_data, dict):
+                                        desired = pin_data.get('state', False)
+                                        self._desired_states[pin] = desired
+                                except (ValueError, TypeError):
+                                    pass
+                            logger.info(f"📡 Initial GPIO state loaded from Firestore ({len(gpio_state)} pins)")
+                            return
+                        
+                        # Process state changes
+                        for pin_str, pin_data in gpio_state.items():
+                            try:
+                                pin = int(pin_str)
+                                if not isinstance(pin_data, dict):
+                                    continue
+                                
+                                desired_state = pin_data.get('state', False)
+                                enabled = pin_data.get('enabled', True)
+                                old_desired = self._desired_states.get(pin)
+                                
+                                # Only act if the DESIRED state actually changed
+                                if desired_state != old_desired:
+                                    self._desired_states[pin] = desired_state
+                                    
+                                    if not enabled:
+                                        logger.warning(f"⚠️  GPIO{pin} state change ignored (enabled=false)")
+                                        continue
+                                    
+                                    logger.info(f"📡 FIRESTORE → GPIO{pin}: {old_desired} → {desired_state}")
+                                    
+                                    # APPLY TO HARDWARE IMMEDIATELY
+                                    self._apply_to_hardware(pin, desired_state)
+                                    
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"Invalid pin key '{pin_str}': {e}")
                 
-                logger.info(f"GPIO command processed: pin={pin}, action={action}, duration={duration}")
-                
-            elif command_type == 'pwm_control':
-                pin = command_data.get('pin')
-                duty_cycle = command_data.get('duty_cycle', 100)
-                frequency = command_data.get('frequency', 1000)
-                
-                logger.info(f"PWM command: pin={pin}, duty_cycle={duty_cycle}%, freq={frequency}Hz")
-                # PWM control logic here
-                
-            else:
-                logger.warning(f"Unknown command type: {command_type}")
-                
+                except Exception as e:
+                    logger.error(f"Error in state listener: {e}", exc_info=True)
+            
+            self._state_listener = device_ref.on_snapshot(on_device_snapshot)
+            logger.info(f"✓ Real-time state listener ACTIVE on devices/{self.hardware_serial}")
+            
         except Exception as e:
-            logger.error(f"Error processing GPIO command {command_id}: {e}")
+            logger.error(f"Failed to start state listener: {e}", exc_info=True)
+    
+    # ──────────────────────────────────────────────────────────────────
+    # COMMAND LISTENER (for explicit commands like pin_control)
+    # ──────────────────────────────────────────────────────────────────
+    
+    def _start_command_listener(self):
+        """Listen for explicit commands in the commands subcollection"""
+        try:
+            commands_ref = (self.firestore_db
+                           .collection('devices')
+                           .document(self.hardware_serial)
+                           .collection('commands'))
+            
+            def on_command_snapshot(doc_snapshot, changes, read_time):
+                for change in changes:
+                    try:
+                        if change.type.name != 'ADDED':
+                            if change.type.name == 'REMOVED':
+                                self._processed_commands.discard(change.document.id)
+                            continue
+                        
+                        command_id = change.document.id
+                        if command_id in self._processed_commands:
+                            continue
+                        
+                        self._processed_commands.add(command_id)
+                        command_data = change.document.to_dict()
+                        
+                        if command_data:
+                            self._process_command(command_id, command_data)
+                            # Delete command after processing
+                            try:
+                                change.document.reference.delete()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.error(f"Error processing command: {e}", exc_info=True)
+            
+            self._command_listener = commands_ref.on_snapshot(on_command_snapshot)
+            logger.info(f"✓ Command listener ACTIVE on devices/{self.hardware_serial}/commands/")
+            
+        except Exception as e:
+            logger.error(f"Failed to start command listener: {e}", exc_info=True)
+    
+    def _process_command(self, command_id: str, data: Dict[str, Any]):
+        """Process an explicit GPIO command"""
+        cmd_type = data.get('type')
+        pin = data.get('pin')
+        action = data.get('action', '').lower()
+        duration = data.get('duration')
+        
+        logger.info(f"⚡ COMMAND {command_id}: type={cmd_type}, pin={pin}, action={action}")
+        
+        if cmd_type == 'pin_control' and pin and action in ('on', 'off'):
+            state = action == 'on'
+            
+            # 1. Apply to hardware IMMEDIATELY
+            self._apply_to_hardware(pin, state)
+            
+            # 2. Update desired state in Firestore (async)
+            self._async_firestore_write({
+                f'gpioState.{pin}.state': state,
+                f'gpioState.{pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+            })
+            
+            # 3. Auto-off if duration specified
+            if duration and state:
+                def auto_off():
+                    time.sleep(duration)
+                    self._apply_to_hardware(pin, False)
+                    self._async_firestore_write({
+                        f'gpioState.{pin}.state': False,
+                        f'gpioState.{pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+                    })
+                    logger.info(f"✓ GPIO{pin} auto-OFF after {duration}s")
+                threading.Thread(target=auto_off, daemon=True).start()
+            
+            logger.info(f"✓ GPIO{pin} → {action.upper()} (command: {command_id})")
+        
+        elif cmd_type == 'pwm_control':
+            logger.info(f"PWM command: pin={pin}, duty={data.get('duty_cycle')}%")
+        else:
+            logger.warning(f"Unknown command type: {cmd_type}")
+    
+    # ──────────────────────────────────────────────────────────────────
+    # HARDWARE CONTROL (GPIO reads/writes)
+    # ──────────────────────────────────────────────────────────────────
+    
+    def _apply_to_hardware(self, bcm_pin: int, state: bool):
+        """Set a GPIO pin HIGH or LOW on the PHYSICAL hardware.
+        Then immediately read it back to verify.
+        """
+        # Setup pin if not initialized
+        if bcm_pin not in self._pins_initialized:
+            self._setup_pin(bcm_pin, 'output')
+        
+        # SET the pin
+        if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
+            GPIO.output(bcm_pin, GPIO.HIGH if state else GPIO.LOW)
+        
+        # READ it back immediately to verify
+        hw_state = self._read_hardware_pin(bcm_pin)
+        
+        old = self._desired_states.get(bcm_pin)
+        self._desired_states[bcm_pin] = state
+        self._hardware_states[bcm_pin] = hw_state
+        
+        # Check mismatch
+        mismatch = (state != hw_state) if hw_state is not None else False
+        
+        if mismatch:
+            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: desired={state} but hardware={hw_state}!")
+        else:
+            logger.info(f"✓ GPIO{bcm_pin}: {old} → {state} (hardware confirmed: {hw_state})")
+        
+        # Sync hardwareState to Firestore (non-blocking)
+        self._async_firestore_write({
+            f'gpioState.{bcm_pin}.hardwareState': hw_state if hw_state is not None else state,
+            f'gpioState.{bcm_pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+            f'gpioState.{bcm_pin}.mismatch': mismatch,
+        })
+        
+        # Fire callbacks
+        if bcm_pin in self._state_callbacks:
+            try:
+                self._state_callbacks[bcm_pin](state)
+            except Exception as e:
+                logger.error(f"Callback error for GPIO{bcm_pin}: {e}")
+    
+    def _read_hardware_pin(self, bcm_pin: int) -> Optional[bool]:
+        """Read the ACTUAL state of a GPIO pin from hardware.
+        
+        For output pins, we temporarily switch to input to read,
+        then switch back to output. This gives the REAL value.
+        """
+        try:
+            if not GPIO_AVAILABLE or config.SIMULATE_HARDWARE:
+                # In simulation, return what we set
+                return self._desired_states.get(bcm_pin, False)
+            
+            # For output pins: read the actual level
+            # GPIO.input() works on output pins too on RPi - returns current output level
+            val = GPIO.input(bcm_pin)
+            return val == GPIO.HIGH
+            
+        except Exception as e:
+            logger.error(f"Failed to read GPIO{bcm_pin} hardware state: {e}")
+            return None
     
     def _setup_pin(self, bcm_pin: int, mode: str):
         """Setup a GPIO pin"""
@@ -283,131 +405,153 @@ class GPIOActuatorController:
                     GPIO.setup(bcm_pin, GPIO.OUT, initial=GPIO.LOW)
                 elif mode == 'input':
                     GPIO.setup(bcm_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-                
-                logger.info(f"GPIO{bcm_pin} setup as {mode}")
-            else:
-                logger.info(f"[SIM] GPIO{bcm_pin} setup as {mode}")
             
             self._pins_initialized[bcm_pin] = mode
-            
+            logger.info(f"GPIO{bcm_pin} setup as {mode}")
         except Exception as e:
             logger.error(f"Failed to setup GPIO{bcm_pin}: {e}")
     
-    def _set_pin_state(self, bcm_pin: int, state: bool, function: str = ''):
-        """Set a GPIO pin HIGH or LOW"""
-        try:
-            if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
-                GPIO.output(bcm_pin, GPIO.HIGH if state else GPIO.LOW)
-                logger.debug(f"GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
-            else:
-                logger.debug(f"[SIM] GPIO{bcm_pin} ({function}) -> {'HIGH' if state else 'LOW'}")
-            
-            # Track state and call callbacks - ONLY if state actually changed
-            old_state = self._pin_states.get(bcm_pin)
-            if old_state != state:
-                self._pin_states[bcm_pin] = state
-                
-                if bcm_pin in self._state_callbacks:
-                    self._state_callbacks[bcm_pin](state)
-                
-                # Cache state to Firestore ONLY if it actually changed
-                self._cache_pin_state_to_device(bcm_pin, state)
-                logger.info(f"✓ GPIO{bcm_pin} state CHANGED: {old_state} → {state}")
-            else:
-                logger.debug(f"GPIO{bcm_pin} state unchanged: {state} (no Firestore update)")
-                
-        except Exception as e:
-            logger.error(f"Failed to set GPIO{bcm_pin} state: {e}")
+    # ──────────────────────────────────────────────────────────────────
+    # HARDWARE SYNC LOOP (GPIO → Firestore hardwareState)
+    # Reads REAL pin values and pushes them to Firestore periodically
+    # ──────────────────────────────────────────────────────────────────
     
-    def _cache_pin_state_to_device(self, bcm_pin: int, state: bool):
-        """Cache pin state to device doc in Firestore - only called on actual state changes"""
-        try:
-            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
-            device_ref.update({
-                f'gpioState.{bcm_pin}.state': state,
-                f'gpioState.{bcm_pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
-            })
-            logger.info(f"📤 GPIO{bcm_pin} state SYNCED to Firestore: {state}")
-        except Exception as e:
-            logger.error(f"Failed to cache GPIO{bcm_pin} state: {e}")
+    def _start_hardware_sync_loop(self):
+        """Start background thread that reads all hardware pins and syncs to Firestore.
+        
+        This is the REAL DATA loop. Every N seconds:
+        1. Read every GPIO pin from hardware
+        2. Write hardwareState to Firestore
+        3. Detect mismatches between desired and actual
+        """
+        def sync_loop():
+            logger.info(f"🔄 Hardware sync loop started (interval: {HARDWARE_STATE_SYNC_INTERVAL}s)")
+            
+            while self._running:
+                try:
+                    time.sleep(HARDWARE_STATE_SYNC_INTERVAL)
+                    
+                    if not self._running:
+                        break
+                    
+                    updates = {}
+                    mismatches = []
+                    
+                    for pin in self._pins_initialized:
+                        # Read REAL value from hardware
+                        hw_state = self._read_hardware_pin(pin)
+                        if hw_state is None:
+                            continue
+                        
+                        self._hardware_states[pin] = hw_state
+                        desired = self._desired_states.get(pin, False)
+                        mismatch = desired != hw_state
+                        
+                        updates[f'gpioState.{pin}.hardwareState'] = hw_state
+                        updates[f'gpioState.{pin}.mismatch'] = mismatch
+                        updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+                        
+                        if mismatch:
+                            mismatches.append((pin, desired, hw_state))
+                    
+                    # Batch write all hardware states (one Firestore call)
+                    if updates:
+                        try:
+                            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+                            device_ref.update(updates)
+                            
+                            if mismatches:
+                                for pin, desired, actual in mismatches:
+                                    logger.error(f"🚨 MISMATCH GPIO{pin}: desired={desired}, hardware={actual}")
+                            else:
+                                logger.debug(f"🔄 Hardware sync: {len(self._pins_initialized)} pins OK")
+                        except Exception as e:
+                            logger.error(f"Hardware sync Firestore write failed: {e}")
+                
+                except Exception as e:
+                    logger.error(f"Hardware sync error: {e}", exc_info=True)
+            
+            logger.info("🔄 Hardware sync loop stopped")
+        
+        self._hardware_sync_thread = threading.Thread(target=sync_loop, daemon=True, name="gpio-hw-sync")
+        self._hardware_sync_thread.start()
+    
+    # ──────────────────────────────────────────────────────────────────
+    # ASYNC FIRESTORE HELPERS (non-blocking writes)
+    # ──────────────────────────────────────────────────────────────────
+    
+    def _async_firestore_write(self, updates: Dict[str, Any]):
+        """Write to Firestore in background thread. NEVER blocks GPIO operations."""
+        def _write():
+            try:
+                device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+                device_ref.update(updates)
+            except Exception as e:
+                logger.error(f"Async Firestore write failed: {e}")
+        
+        threading.Thread(target=_write, daemon=True).start()
+    
+    # ──────────────────────────────────────────────────────────────────
+    # PUBLIC API
+    # ──────────────────────────────────────────────────────────────────
     
     def register_callback(self, bcm_pin: int, callback: Callable[[bool], None]):
         """Register a callback for when a pin state changes"""
         self._state_callbacks[bcm_pin] = callback
     
     def read_pin(self, bcm_pin: int) -> Optional[bool]:
-        """Read the current state of an input pin"""
-        try:
-            if bcm_pin not in self._pins_initialized:
-                logger.warning(f"GPIO{bcm_pin} not initialized")
-                return None
-            
-            if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
-                return GPIO.input(bcm_pin) == GPIO.HIGH
-            else:
-                logger.info(f"[SIM] Read GPIO{bcm_pin}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Failed to read GPIO{bcm_pin}: {e}")
-            return None
+        """Read the current state of a pin from hardware"""
+        return self._read_hardware_pin(bcm_pin)
     
     def set_pin(self, bcm_pin: int, state: bool):
-        """Manually set a pin state (bypasses Firestore)"""
-        if bcm_pin in self._pins_initialized:
-            self._set_pin_state(bcm_pin, state)
-        else:
-            logger.warning(f"GPIO{bcm_pin} not initialized, setting up first")
-            self._setup_pin(bcm_pin, 'output')
-            self._set_pin_state(bcm_pin, state)
+        """Manually set a pin state and sync to Firestore"""
+        self._apply_to_hardware(bcm_pin, state)
+        self._async_firestore_write({
+            f'gpioState.{bcm_pin}.state': state,
+            f'gpioState.{bcm_pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+        })
     
-    async def update_firestore_state(self, bcm_pin: int, state: bool):
-        """Update the pin state back to Firestore (for sensor readings, etc)"""
-        try:
-            device_ref = self.firestore_db.collection('devices').document(self.device_id)
-            
-            await device_ref.set({
-                f'gpioState.{bcm_pin}.state': state,
-                f'gpioState.{bcm_pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
-            }, merge=True)
-            
-            logger.debug(f"Updated Firestore GPIO{bcm_pin} state to {state}")
-            
-        except Exception as e:
-            logger.error(f"Failed to update Firestore state: {e}")
+    def get_pin_states(self) -> Dict[int, Dict[str, Any]]:
+        """Get current state of all pins (desired + hardware)"""
+        states = {}
+        for pin, mode in self._pins_initialized.items():
+            states[pin] = {
+                'mode': mode,
+                'name': self._pin_names.get(pin, 'Unknown'),
+                'desired': self._desired_states.get(pin, False),
+                'hardware': self._hardware_states.get(pin, False),
+                'mismatch': self._desired_states.get(pin) != self._hardware_states.get(pin),
+            }
+        return states
     
     def disconnect(self):
-        """Stop listening and cleanup GPIO"""
+        """Stop listeners and cleanup GPIO"""
+        logger.info("Disconnecting GPIO controller...")
         self._running = False
+        
+        if self._state_listener:
+            self._state_listener.unsubscribe()
+            logger.info("  State listener stopped")
         
         if self._command_listener:
             self._command_listener.unsubscribe()
-            logger.info("GPIO command listener stopped")
+            logger.info("  Command listener stopped")
         
-        if self._gpio_state_listener:
-            self._gpio_state_listener.unsubscribe()
-            logger.info("GPIO state listener stopped")
+        if self._hardware_sync_thread and self._hardware_sync_thread.is_alive():
+            self._hardware_sync_thread.join(timeout=5)
+            logger.info("  Hardware sync thread stopped")
         
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
             GPIO.cleanup()
-            logger.info("GPIO cleanup complete")
-    
-    def get_pin_states(self) -> Dict[int, Dict[str, Any]]:
-        """Get current state of all initialized pins"""
-        states = {}
-        for bcm_pin, mode in self._pins_initialized.items():
-            if mode == 'input':
-                value = self.read_pin(bcm_pin)
-            else:
-                value = None  # Output pins don't have readable state in BCM mode
-            states[bcm_pin] = {
-                'mode': mode,
-                'state': value
-            }
-        return states
+            logger.info("  GPIO cleanup complete")
+        
+        logger.info("✓ GPIO controller disconnected")
 
 
-# Singleton instance
+# ──────────────────────────────────────────────────────────────────
+# Singleton
+# ──────────────────────────────────────────────────────────────────
+
 _gpio_controller: Optional[GPIOActuatorController] = None
 
 

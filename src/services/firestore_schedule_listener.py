@@ -55,7 +55,9 @@ class FirestoreScheduleListener:
             True if listener started successfully
         """
         try:
+            logger.info(f"🔄 FirestoreScheduleListener starting for {self.hardware_serial}...")
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            logger.debug(f"✓ Device reference created: {device_ref.path}")
             
             # Track if this is initial load
             is_initial = [True]

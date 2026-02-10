@@ -155,23 +155,50 @@ class GPIOActuatorController:
         return pins
     
     def _sync_initial_state_to_firestore(self):
-        """Push initial pin state to Firestore on boot (all pins LOW)"""
+        """Register pins in Firestore on boot.
+        
+        PI-OWNED fields (written every boot):
+          hardwareState, mismatch, lastHardwareRead, name, pin, mode
+        
+        WEBAPP-OWNED fields (NEVER overwritten by Pi):
+          state, enabled
+        
+        If a pin doesn't exist yet in Firestore, we create it with
+        state=false, enabled=true as initial defaults. But if the webapp
+        already set those, we leave them alone.
+        """
         try:
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
-            updates = {}
             
+            # Read current Firestore state to avoid overwriting webapp fields
+            doc = device_ref.get()
+            existing_gpio = {}
+            if doc.exists:
+                existing_gpio = doc.to_dict().get('gpioState', {})
+            
+            updates = {}
             for pin, name in self._pin_names.items():
-                updates[f'gpioState.{pin}.state'] = False
+                pin_str = str(pin)
+                existing_pin = existing_gpio.get(pin_str, {})
+                
+                # Pi-owned: always write these
                 updates[f'gpioState.{pin}.hardwareState'] = False
+                updates[f'gpioState.{pin}.mismatch'] = False
+                updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
                 updates[f'gpioState.{pin}.name'] = name
                 updates[f'gpioState.{pin}.pin'] = pin
                 updates[f'gpioState.{pin}.mode'] = 'output'
-                updates[f'gpioState.{pin}.enabled'] = True
-                updates[f'gpioState.{pin}.mismatch'] = False
-                updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+                
+                # Webapp-owned: only set defaults if pin doesn't exist yet
+                if not existing_pin:
+                    updates[f'gpioState.{pin}.state'] = False
+                    updates[f'gpioState.{pin}.enabled'] = True
+                else:
+                    # Load webapp's desired state into memory
+                    self._desired_states[pin] = existing_pin.get('state', False)
             
             device_ref.update(updates)
-            logger.info(f"✅ Synced {len(self._pins_initialized)} pins to Firestore (state + hardwareState)")
+            logger.info(f"✅ Registered {len(self._pins_initialized)} pins in Firestore (webapp fields preserved)")
         except Exception as e:
             logger.error(f"Failed to sync initial state: {e}")
     

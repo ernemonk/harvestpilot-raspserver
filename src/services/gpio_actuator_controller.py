@@ -450,8 +450,7 @@ class GPIOActuatorController:
                 firestore_db=self.firestore_db,
                 hardware_serial=self.hardware_serial,
                 schedule_cache=self._schedule_cache,
-                schedule_state_tracker=self._schedule_state_tracker,
-                executor_callback=self._execute_schedule,
+                schedule_executor=self._execute_schedule,
             )
             
             self._schedule_listener.start_listening()

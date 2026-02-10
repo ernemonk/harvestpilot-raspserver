@@ -177,7 +177,7 @@ class FirestoreScheduleListener:
                                     logger.info(f"⚡ Executing new schedule GPIO{gpio_num}/{schedule_id}")
                                     threading.Thread(
                                         target=self.schedule_executor,
-                                        args=(gpio_num, new_sched),
+                                        args=(gpio_num, schedule_id, schedule_def),
                                         daemon=True
                                     ).start()
                         else:
@@ -197,7 +197,7 @@ class FirestoreScheduleListener:
                                                 logger.info(f"⚡ Re-executing modified schedule GPIO{gpio_num}/{schedule_id}")
                                                 threading.Thread(
                                                     target=self.schedule_executor,
-                                                    args=(gpio_num, updated_sched),
+                                                    args=(gpio_num, schedule_id, schedule_def),
                                                     daemon=True
                                                 ).start()
                 

@@ -569,10 +569,10 @@ class GPIOActuatorController:
         Handles webapp's schedule format:
         - startTime/endTime: Time window (HH:MM format) — schedule repeats within this window
         - durationSeconds: How long to keep pin ON per cycle
-        - frequencySeconds: Total cycle length (ON + OFF time)
+        - frequencySeconds: How long to PAUSE (OFF) between ON cycles
         
-        Example: durationSeconds=2, frequencySeconds=3, startTime=00:48, endTime=00:54
-          → Turn ON for 2s, OFF for 1s, repeat until 00:54
+        Example: durationSeconds=2, frequencySeconds=2, startTime=12:25, endTime=12:30
+          → Turn ON for 2s, OFF for 2s, ON for 2s, OFF for 2s... until 12:30
         
         Args:
             pin: GPIO pin number
@@ -616,10 +616,11 @@ class GPIOActuatorController:
                     return
                 self._schedule_state_tracker.mark_running(pin, schedule_id)
             
-            logger.info(f"▶️  Executing '{schedule_name}' on GPIO{pin}: ON for {duration_seconds}s every {frequency_seconds}s (window: {start_time}-{end_time})")
+            logger.info(f"▶️  Executing '{schedule_name}' on GPIO{pin}: ON for {duration_seconds}s, pause {frequency_seconds}s (window: {start_time}-{end_time})")
             
-            # Ensure OFF time exists (frequency must be > duration)
-            off_time = max(0, frequency_seconds - duration_seconds)
+            # frequencySeconds = the PAUSE (OFF time) between runs
+            # Minimum 0.5s to prevent GPIO chatter
+            off_time = max(0.5, frequency_seconds)
             cycle_count = 0
             
             # Repeat ON/OFF cycles within the time window

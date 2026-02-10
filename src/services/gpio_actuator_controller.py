@@ -490,63 +490,65 @@ class GPIOActuatorController:
     def _execute_schedule(self, pin: int, schedule_id: str, schedule_data: Dict[str, Any]):
         """Execute a schedule on the given GPIO pin.
         
-        Called by FirestoreScheduleListener when a schedule becomes active.
-        Runs in a separate thread to avoid blocking the listener.
+        Handles webapp's schedule format:
+        - startTime/endTime: Time window (HH:MM format)
+        - durationSeconds: How long to run the on/off cycle
+        - frequencySeconds: Interval for toggling on/off
         
         Args:
             pin: GPIO pin number
             schedule_id: Schedule document ID
-            schedule_data: Schedule configuration (type, cycles, duration, etc.)
+            schedule_data: Schedule configuration from Firestore
         """
         try:
-            schedule_type = schedule_data.get('type', 'unknown')
+            # Extract schedule parameters
+            enabled = schedule_data.get('enabled', True)
+            start_time = schedule_data.get('startTime', '')
+            end_time = schedule_data.get('endTime', '')
+            duration_seconds = schedule_data.get('durationSeconds', 10)
+            frequency_seconds = schedule_data.get('frequencySeconds', 10)
+            schedule_name = schedule_data.get('name', f'Schedule-{schedule_id}')
+            
+            if not enabled:
+                logger.info(f"⏸️  Schedule {schedule_name} on GPIO{pin} is disabled, skipping")
+                return
+            
+            # Check if we're in the time window
+            from datetime import datetime
+            now = datetime.now().strftime('%H:%M')
+            
+            if start_time and end_time:
+                if not (start_time <= now <= end_time):
+                    logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside time window ({start_time}-{end_time}), skipping")
+                    return
             
             with self._schedule_execution_lock:
                 self._schedule_state_tracker.mark_running(pin, schedule_id)
             
-            logger.info(f"▶️  Executing {schedule_type} on GPIO{pin}: {schedule_id}")
+            logger.info(f"▶️  Executing '{schedule_name}' on GPIO{pin}: {duration_seconds}s window, toggle every {frequency_seconds}s")
             
-            # Handle different schedule types
-            if schedule_type == 'pwm_cycle':
-                cycles = schedule_data.get('cycles', 1)
-                on_duration = schedule_data.get('on_duration', 1.0)
-                off_duration = schedule_data.get('off_duration', 1.0)
-                
-                for i in range(cycles):
-                    self._apply_to_hardware(pin, True)
-                    time.sleep(on_duration)
-                    self._apply_to_hardware(pin, False)
-                    if i < cycles - 1:
-                        time.sleep(off_duration)
+            # Toggle the pin on/off for the specified duration
+            start = time.time()
+            is_on = False
             
-            elif schedule_type == 'pwm_fade':
-                duration = schedule_data.get('duration', 5.0)
-                steps = schedule_data.get('steps', 10)
-                step_duration = duration / steps
+            while (time.time() - start) < duration_seconds:
+                # Toggle state
+                is_on = not is_on
+                self._apply_to_hardware(pin, is_on)
+                logger.debug(f"   GPIO{pin}: {'ON' if is_on else 'OFF'}")
                 
-                for step in range(steps + 1):
-                    # Simple on/off fade simulation
-                    if step <= steps // 2:
-                        self._apply_to_hardware(pin, True)
-                    else:
-                        self._apply_to_hardware(pin, False)
-                    time.sleep(step_duration)
+                # Sleep for the frequency interval
+                time.sleep(frequency_seconds)
             
-            elif schedule_type == 'digital_toggle':
-                cycles = schedule_data.get('cycles', 1)
-                toggle_interval = schedule_data.get('toggle_interval', 0.5)
-                
-                for i in range(cycles):
-                    self._apply_to_hardware(pin, not self._hardware_states.get(pin, False))
-                    time.sleep(toggle_interval)
+            # Ensure pin is OFF at the end
+            self._apply_to_hardware(pin, False)
+            logger.info(f"✓ Schedule '{schedule_name}' on GPIO{pin} completed")
             
-            elif schedule_type == 'hold_state':
-                state = schedule_data.get('state', True)
-                duration = schedule_data.get('duration', 60.0)
-                
-                self._apply_to_hardware(pin, state)
-                time.sleep(duration)
-                self._apply_to_hardware(pin, False)
+            with self._schedule_execution_lock:
+                self._schedule_state_tracker.mark_stopped(pin, schedule_id)
+            
+        except Exception as e:
+            logger.error(f"Error executing schedule {schedule_id} on GPIO{pin}: {e}", exc_info=True)
             
             else:
                 logger.warning(f"Unknown schedule type: {schedule_type}")

@@ -20,6 +20,7 @@ class ConfigManager:
     DEFAULT_INTERVALS = {
         "heartbeat_interval_s": 30,
         "sync_interval_s": 1800,
+        "hardware_state_sync_interval_s": 30,
     }
 
     # Min/max bounds to prevent invalid configurations
@@ -29,6 +30,7 @@ class ConfigManager:
         "sync_interval_s": (300, 86400),          # 5 min to 24 hours
         "aggregation_interval_s": (30, 3600),     # 30s to 1 hour
         "sensor_read_interval_s": (1, 300),       # 1s to 5 min
+        "hardware_state_sync_interval_s": (5, 600), # 5s to 10 min
     }
 
     def __init__(
@@ -373,7 +375,14 @@ class ConfigManager:
 
     def get_sensor_read_interval(self) -> float:
         """Get sensor read interval in seconds."""
-        return self.intervals.get("sensor_read_interval_s", self.DEFAULT_INTERVALS["sensor_read_interval_s"])
+        return self.intervals.get("sensor_read_interval_s", 5)
+
+    def get_hardware_state_sync_interval(self) -> float:
+        """Get hardware state Firestore sync interval in seconds.
+        Controls how often hardwareState is written to Firestore.
+        Local hardware reads always happen every 5s regardless."""
+        return self.intervals.get("hardware_state_sync_interval_s",
+                                  self.DEFAULT_INTERVALS["hardware_state_sync_interval_s"])
 
     def get_all_intervals(self) -> Dict[str, float]:
         """Get all current intervals."""

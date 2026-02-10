@@ -27,8 +27,8 @@ from .. import config
 
 logger = logging.getLogger(__name__)
 
-# How often to read hardware state and sync to Firestore (seconds)
-HARDWARE_STATE_SYNC_INTERVAL = 2.0
+# Local hardware read interval (fast, in-memory only, no Firestore write)
+LOCAL_HARDWARE_READ_INTERVAL = 5.0
 
 
 class GPIOActuatorController:
@@ -40,13 +40,20 @@ class GPIOActuatorController:
       - hardwareState: What the GPIO pin ACTUALLY IS (measured)
     
     They should always match. If they don't, something is wrong.
+    
+    TIMING:
+      - Local hardware read: every 5s (in-memory, no network)
+      - Firestore hardwareState write: at YOUR configured interval
+        (set in Firestore config/intervals/hardware_state_sync_interval_s)
     """
     
-    def __init__(self, hardware_serial: str = None, device_id: str = None):
+    def __init__(self, hardware_serial: str = None, device_id: str = None,
+                 config_manager=None):
         self.hardware_serial = hardware_serial or config.HARDWARE_SERIAL
         self.device_id = device_id or config.DEVICE_ID
         self.firestore_db = None
         self._running = False
+        self._config_manager = config_manager  # For dynamic intervals from Firestore
         
         # Pin tracking
         self._pins_initialized: Dict[int, str] = {}       # bcmPin -> mode ('output'/'input')
@@ -96,9 +103,11 @@ class GPIOActuatorController:
             # 5. Start hardware readback loop (GPIO → Firestore hardwareState)
             self._start_hardware_sync_loop()
             
+            sync_interval = self._get_firestore_sync_interval()
             logger.info(f"✅ GPIO Controller ONLINE - hardware_serial: {self.hardware_serial}")
             logger.info(f"   Listening: devices/{self.hardware_serial}/gpioState")
-            logger.info(f"   Hardware sync: every {HARDWARE_STATE_SYNC_INTERVAL}s")
+            logger.info(f"   Local hardware read: every {LOCAL_HARDWARE_READ_INTERVAL}s")
+            logger.info(f"   Firestore hardwareState write: every {sync_interval}s (configurable)")
             return True
             
         except Exception as e:
@@ -416,57 +425,83 @@ class GPIOActuatorController:
     # Reads REAL pin values and pushes them to Firestore periodically
     # ──────────────────────────────────────────────────────────────────
     
+    def _get_firestore_sync_interval(self) -> float:
+        """Get the Firestore hardwareState write interval from config.
+        Falls back to 30s if config_manager not available."""
+        if self._config_manager:
+            return self._config_manager.get_hardware_state_sync_interval()
+        return 30.0
+    
     def _start_hardware_sync_loop(self):
-        """Start background thread that reads all hardware pins and syncs to Firestore.
+        """Start background thread with TWO separate cadences:
         
-        This is the REAL DATA loop. Every N seconds:
-        1. Read every GPIO pin from hardware
-        2. Write hardwareState to Firestore
-        3. Detect mismatches between desired and actual
+        1. LOCAL READ (every 5s): Read all GPIO pins from hardware into memory.
+           Fast. No network. Catches mismatches immediately.
+        
+        2. FIRESTORE WRITE (at YOUR configured interval): Batch-write all
+           hardwareState values to Firestore. Interval is defined in:
+           Firestore → devices/{serial}/config/intervals/hardware_state_sync_interval_s
         """
         def sync_loop():
-            logger.info(f"🔄 Hardware sync loop started (interval: {HARDWARE_STATE_SYNC_INTERVAL}s)")
+            sync_interval = self._get_firestore_sync_interval()
+            logger.info(f"🔄 Hardware sync loop started")
+            logger.info(f"   Local read: every {LOCAL_HARDWARE_READ_INTERVAL}s")
+            logger.info(f"   Firestore write: every {sync_interval}s (from config/intervals)")
+            
+            last_firestore_write = time.time()
             
             while self._running:
                 try:
-                    time.sleep(HARDWARE_STATE_SYNC_INTERVAL)
+                    time.sleep(LOCAL_HARDWARE_READ_INTERVAL)
                     
                     if not self._running:
                         break
                     
-                    updates = {}
+                    # ── LOCAL READ (every 5s) ──────────────────────────
+                    # Read ALL pins from hardware into memory. No Firestore.
                     mismatches = []
-                    
                     for pin in self._pins_initialized:
-                        # Read REAL value from hardware
                         hw_state = self._read_hardware_pin(pin)
                         if hw_state is None:
                             continue
                         
                         self._hardware_states[pin] = hw_state
                         desired = self._desired_states.get(pin, False)
-                        mismatch = desired != hw_state
                         
-                        updates[f'gpioState.{pin}.hardwareState'] = hw_state
-                        updates[f'gpioState.{pin}.mismatch'] = mismatch
-                        updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
-                        
-                        if mismatch:
+                        if desired != hw_state:
                             mismatches.append((pin, desired, hw_state))
                     
-                    # Batch write all hardware states (one Firestore call)
-                    if updates:
-                        try:
-                            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
-                            device_ref.update(updates)
-                            
-                            if mismatches:
-                                for pin, desired, actual in mismatches:
-                                    logger.error(f"🚨 MISMATCH GPIO{pin}: desired={desired}, hardware={actual}")
-                            else:
-                                logger.debug(f"🔄 Hardware sync: {len(self._pins_initialized)} pins OK")
-                        except Exception as e:
-                            logger.error(f"Hardware sync Firestore write failed: {e}")
+                    if mismatches:
+                        for pin, desired, actual in mismatches:
+                            logger.error(f"🚨 MISMATCH GPIO{pin}: desired={desired}, hardware={actual}")
+                    else:
+                        logger.debug(f"🔄 Local read: {len(self._pins_initialized)} pins OK")
+                    
+                    # ── FIRESTORE WRITE (at configured interval) ──────
+                    # Re-read interval each cycle so config changes take effect live
+                    sync_interval = self._get_firestore_sync_interval()
+                    now = time.time()
+                    
+                    if now - last_firestore_write >= sync_interval:
+                        last_firestore_write = now
+                        
+                        updates = {}
+                        for pin in self._pins_initialized:
+                            hw_state = self._hardware_states.get(pin)
+                            if hw_state is None:
+                                continue
+                            desired = self._desired_states.get(pin, False)
+                            updates[f'gpioState.{pin}.hardwareState'] = hw_state
+                            updates[f'gpioState.{pin}.mismatch'] = desired != hw_state
+                            updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+                        
+                        if updates:
+                            try:
+                                device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+                                device_ref.update(updates)
+                                logger.info(f"📤 Firestore sync: {len(self._pins_initialized)} pins written (next in {sync_interval}s)")
+                            except Exception as e:
+                                logger.error(f"Hardware sync Firestore write failed: {e}")
                 
                 except Exception as e:
                     logger.error(f"Hardware sync error: {e}", exc_info=True)

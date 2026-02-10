@@ -54,9 +54,11 @@ class RaspServer:
         
         # Initialize GPIO Actuator Controller for real-time Firestore control
         # Use hardware_serial as primary identifier for secure device authentication
+        # Pass config_manager so GPIO controller uses YOUR Firestore-defined intervals
         self.gpio_actuator = GPIOActuatorController(
             hardware_serial=config.HARDWARE_SERIAL,
-            device_id=config.DEVICE_ID
+            device_id=config.DEVICE_ID,
+            config_manager=self.config_manager
         )
         
         # Register command handlers

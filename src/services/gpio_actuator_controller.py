@@ -127,10 +127,13 @@ class GPIOActuatorController:
             self.firestore_db = firestore.client()
             self._running = True
             
-            # 1. Initialize GPIO pins on hardware
+            # 1. Load pin definitions FROM Firestore (single source of truth)
+            self._load_pins_from_firestore()
+            
+            # 2. Initialize GPIO pins on hardware (using Firestore-loaded config)
             self._initialize_hardware_pins()
             
-            # 2. Sync initial state TO Firestore (all pins LOW on boot)
+            # 3. Sync initial state TO Firestore (all pins LOW on boot)
             self._sync_initial_state_to_firestore()
             
             # 3. Start REAL-TIME listener on gpioState (Firestore → GPIO)
@@ -165,20 +168,67 @@ class GPIOActuatorController:
     # INITIALIZATION
     # ──────────────────────────────────────────────────────────────────
     
+    def _load_pins_from_firestore(self):
+        """Load ALL pin definitions from Firestore (single source of truth).
+        
+        Reads devices/{hardware_serial}/gpioState to discover which pins exist,
+        their names, device types, and active-LOW configuration.
+        No hardcoded pins — Firestore is the only authority.
+        """
+        try:
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            doc = device_ref.get()
+            
+            if not doc.exists:
+                logger.error(f"Device document not found: devices/{self.hardware_serial}")
+                logger.error("No pins to initialize — create the device in the webapp first.")
+                return
+            
+            gpio_state = doc.to_dict().get('gpioState', {})
+            if not gpio_state:
+                logger.warning("No gpioState in Firestore — no pins to initialize.")
+                return
+            
+            self._active_low_pins = set()
+            
+            for pin_str, pin_data in gpio_state.items():
+                try:
+                    pin = int(pin_str)
+                except (ValueError, TypeError):
+                    continue
+                
+                name = pin_data.get('name', f'GPIO{pin}')
+                self._pin_names[pin] = name
+                
+                # Active-LOW: read from Firestore per-pin field
+                if pin_data.get('active_low', False):
+                    self._active_low_pins.add(pin)
+            
+            logger.info(f"📚 Loaded {len(self._pin_names)} pins from Firestore")
+            if self._active_low_pins:
+                logger.info(f"   Active-LOW pins: {sorted(self._active_low_pins)}")
+                
+        except Exception as e:
+            logger.error(f"Failed to load pins from Firestore: {e}", exc_info=True)
+    
     def _initialize_hardware_pins(self):
         """Setup all GPIO pins on the physical hardware.
         
+        Uses pin definitions loaded from Firestore by _load_pins_from_firestore().
         SAFETY: Active-LOW relay pins are initialized to HIGH (relay OFF).
         All other pins are initialized to LOW (device OFF).
         """
-        all_pins = self._get_all_pin_definitions()
-        active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+        if not self._pin_names:
+            logger.warning("No pins loaded from Firestore — nothing to initialize.")
+            return
         
-        logger.info(f"🔧 Initializing {len(all_pins)} GPIO pins on hardware...")
+        active_low = getattr(self, '_active_low_pins', set())
+        
+        logger.info(f"🔧 Initializing {len(self._pin_names)} GPIO pins on hardware...")
         if active_low:
             logger.info(f"   Active-LOW relay pins: {sorted(active_low)}")
         
-        for pin, name in sorted(all_pins.items()):
+        for pin, name in sorted(self._pin_names.items()):
             try:
                 is_active_low = pin in active_low
                 
@@ -193,7 +243,6 @@ class GPIOActuatorController:
                 self._pins_initialized[pin] = 'output'
                 self._desired_states[pin] = False  # All pins start as "desired OFF"
                 self._hardware_states[pin] = False  # All pins start as "device OFF"
-                self._pin_names[pin] = name
                 
                 init_level = "HIGH (active-LOW relay)" if is_active_low else "LOW"
                 logger.debug(f"  ✓ GPIO{pin}: {name} → OUTPUT, {init_level}")
@@ -201,21 +250,6 @@ class GPIOActuatorController:
                 logger.warning(f"  ⚠️  GPIO{pin} ({name}) setup failed: {e}")
         
         logger.info(f"✓ {len(self._pins_initialized)} pins initialized on hardware")
-    
-    def _get_all_pin_definitions(self) -> Dict[int, str]:
-        """Build complete pin list from config"""
-        pins = {
-            config.PUMP_PWM_PIN: "Pump PWM",
-            config.PUMP_RELAY_PIN: "Pump Relay",
-            config.LED_PWM_PIN: "LED PWM",
-            config.LED_RELAY_PIN: "LED Relay",
-        }
-        for motor in config.MOTOR_PINS:
-            pins[motor['pwm']] = f"Motor {motor['tray']} PWM"
-            pins[motor['dir']] = f"Motor {motor['tray']} Direction"
-            pins[motor['home']] = f"Motor {motor['tray']} Home Sensor"
-            pins[motor['end']] = f"Motor {motor['tray']} End Sensor"
-        return pins
     
     def _sync_initial_state_to_firestore(self):
         """SAFE boot sync: ALL pins start OFF. Report hardware state.
@@ -319,27 +353,12 @@ class GPIOActuatorController:
             logger.error(f"Failed to sync initial state: {e}")
     
     def _infer_device_type_from_pin(self, pin: int) -> Optional[str]:
-        """Try to infer device type from pin number"""
-        # Map from hardcoded pins to device types
-        device_type_map = {
-            17: "pump",    # Pump PWM
-            19: "pump",    # Pump Relay
-            18: "light",   # LED PWM
-            13: "light",   # LED Relay
-            4: "sensor",   # DHT
-            27: "sensor",  # Water level
-            # Motors (2, 3, 5, 6, 12, 13...)
-        }
+        """Infer device type — not used for existing Firestore pins.
         
-        device_type = device_type_map.get(pin)
-        if not device_type:
-            # Assume it's a motor if it's in the motor pins list
-            for motor in config.MOTOR_PINS:
-                if pin in [motor.get('pwm'), motor.get('dir'), motor.get('home'), motor.get('end')]:
-                    device_type = "motor"
-                    break
-        
-        return device_type
+        For any NEW pin that somehow appears without Firestore metadata,
+        default to 'motor' since it's the safest generic type.
+        """
+        return "motor"
     
     def _is_schedule_running_on_pin(self, pin: int) -> bool:
         """Check if ANY schedule is actively running on a GPIO pin."""
@@ -810,7 +829,7 @@ class GPIOActuatorController:
         if bcm_pin not in self._pins_initialized:
             self._setup_pin(bcm_pin, 'output')
         
-        active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+        active_low = getattr(self, '_active_low_pins', set())
         is_active_low = bcm_pin in active_low
         
         # Compute actual GPIO level (invert for active-LOW)
@@ -866,7 +885,7 @@ class GPIOActuatorController:
             # GPIO.input() works on output pins too on RPi - returns current output level
             val = GPIO.input(bcm_pin)
             
-            active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+            active_low = getattr(self, '_active_low_pins', set())
             if bcm_pin in active_low:
                 # Active-LOW: GPIO LOW = relay ON = True
                 return val == GPIO.LOW
@@ -882,7 +901,7 @@ class GPIOActuatorController:
         try:
 
 
-            active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+            active_low = getattr(self, '_active_low_pins', set())
             
             if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
                 if mode == 'output':
@@ -1037,7 +1056,7 @@ class GPIOActuatorController:
         """
         logger.critical("🚨 EMERGENCY STOP — forcing ALL pins OFF")
         
-        active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+        active_low = getattr(self, '_active_low_pins', set())
         updates = {}
         
         for pin in list(self._pins_initialized.keys()):

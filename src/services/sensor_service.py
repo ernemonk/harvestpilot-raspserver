@@ -1,17 +1,17 @@
 """Sensor service - high-level sensor management"""
 
 import logging
-import asyncio
-from datetime import datetime
 from ..controllers.sensors import SensorController
-from ..models import SensorReading, ThresholdAlert
-from .. import config
+from ..models import SensorReading
 
 logger = logging.getLogger(__name__)
 
 
 class SensorService:
-    """Manages sensor reading and threshold checking"""
+    """Manages sensor reading.
+    
+    Thresholds are configured in Firestore, not in config.py.
+    """
     
     def __init__(self, firestore_db=None, hardware_serial=None):
         self.controller = SensorController(firestore_db=firestore_db, hardware_serial=hardware_serial)
@@ -34,73 +34,3 @@ class SensorService:
         except Exception as e:
             logger.error(f"Failed to read sensors: {e}")
             raise
-    
-    async def check_thresholds(self, reading: SensorReading) -> list[ThresholdAlert]:
-        """Check if reading exceeds defined thresholds"""
-        alerts = []
-        
-        # Temperature thresholds
-        if reading.temperature < config.TEMP_MIN:
-            alerts.append(ThresholdAlert(
-                severity="warning",
-                sensor_type="temperature",
-                current_value=reading.temperature,
-                threshold=config.TEMP_MIN,
-                timestamp=datetime.now().isoformat()
-            ))
-        elif reading.temperature > config.TEMP_MAX:
-            alerts.append(ThresholdAlert(
-                severity="warning",
-                sensor_type="temperature",
-                current_value=reading.temperature,
-                threshold=config.TEMP_MAX,
-                timestamp=datetime.now().isoformat()
-            ))
-        
-        # Humidity thresholds
-        if reading.humidity < config.HUMIDITY_MIN:
-            alerts.append(ThresholdAlert(
-                severity="warning",
-                sensor_type="humidity",
-                current_value=reading.humidity,
-                threshold=config.HUMIDITY_MIN,
-                timestamp=datetime.now().isoformat()
-            ))
-        elif reading.humidity > config.HUMIDITY_MAX:
-            alerts.append(ThresholdAlert(
-                severity="warning",
-                sensor_type="humidity",
-                current_value=reading.humidity,
-                threshold=config.HUMIDITY_MAX,
-                timestamp=datetime.now().isoformat()
-            ))
-        
-        # Soil moisture thresholds
-        if reading.soil_moisture < config.SOIL_MOISTURE_MIN:
-            alerts.append(ThresholdAlert(
-                severity="warning",
-                sensor_type="soil_moisture",
-                current_value=reading.soil_moisture,
-                threshold=config.SOIL_MOISTURE_MIN,
-                timestamp=datetime.now().isoformat()
-            ))
-        elif reading.soil_moisture > config.SOIL_MOISTURE_MAX:
-            alerts.append(ThresholdAlert(
-                severity="warning",
-                sensor_type="soil_moisture",
-                current_value=reading.soil_moisture,
-                threshold=config.SOIL_MOISTURE_MAX,
-                timestamp=datetime.now().isoformat()
-            ))
-        
-        # Water level critical
-        if not reading.water_level:
-            alerts.append(ThresholdAlert(
-                severity="critical",
-                sensor_type="water_level",
-                current_value=0,
-                threshold=1,
-                timestamp=datetime.now().isoformat()
-            ))
-        
-        return alerts

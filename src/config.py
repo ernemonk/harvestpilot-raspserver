@@ -77,68 +77,12 @@ FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", _default_cred
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "harvest-hub")
 
-# GPIO Pin Configuration: MUST be configured in Firestore per device
-# All sensor pins are now defined exclusively in the web app's Firestore database
-# under devices/{hardware_serial}/gpioState/
-# NO HARDCODED PINS - configuration comes from Firestore only
-
-PUMP_PWM_PIN = 17  # GPIO 17 (Physical Pin 11) - Pump MOSFET
-PUMP_RELAY_PIN = 19
-
-LED_PWM_PIN = 18  # GPIO 18 (Physical Pin 12) - LED strip MOSFET (PWM brightness)
-LED_RELAY_PIN = 13
-
-# Active-LOW relay pins: These relay modules turn ON when GPIO is LOW.
-# Common with SRD-05VDC-SL-C and similar Chinese relay boards.
-# Set to empty set {} if your relays are active-HIGH (GPIO HIGH = relay ON).
-# Safety: active-LOW pins are initialized to HIGH (relay OFF) on boot.
-ACTIVE_LOW_PINS: set = {19, 13}  # Relay pins (pump relay, LED relay)
-
-# Harvest belt motors (6 trays)
-# FIXED: Removed conflicting pins (17 used by Pump, 18 by LED, 1 is invalid)
-MOTOR_PINS = [
-    {"tray": 1, "pwm": 2, "dir": 3, "home": 4, "end": 27},      # Changed home from 17→4
-    {"tray": 2, "pwm": 9, "dir": 11, "home": 5, "end": 6},
-    {"tray": 3, "pwm": 10, "dir": 22, "home": 23, "end": 24},
-    {"tray": 4, "pwm": 14, "dir": 15, "home": 28, "end": 25},    # Changed home from 18→28
-    {"tray": 5, "pwm": 8, "dir": 7, "home": 29, "end": 12},      # Changed home from 1→29
-    {"tray": 6, "pwm": 16, "dir": 20, "home": 21, "end": 26},
-]
-
-# PWM Configuration
-PUMP_PWM_FREQUENCY = 1000  # Hz
-LED_PWM_FREQUENCY = 1000  # Hz
-MOTOR_PWM_FREQUENCY = 1000  # Hz
-
-# Environmental Thresholds
-TEMP_MIN = 65.0  # °F
-TEMP_MAX = 80.0
-HUMIDITY_MIN = 50.0  # %
-HUMIDITY_MAX = 70.0
-SOIL_MOISTURE_MIN = 60.0  # %
-SOIL_MOISTURE_MAX = 80.0
-
-# Sensor Reading
-SENSOR_READING_INTERVAL = 5  # seconds
-
-# Irrigation Configuration
-IRRIGATION_CYCLE_DURATION = 30  # seconds
-PUMP_DEFAULT_SPEED = 80  # %
-IRRIGATION_SCHEDULE = ["06:00", "12:00", "18:00"]
-
-# Lighting Configuration
-LIGHT_ON_TIME = "06:00"
-LIGHT_OFF_TIME = "22:00"
-LED_DEFAULT_INTENSITY = 80  # %
-
-# Harvest Configuration
-HARVEST_BELT_SPEED = 50  # %
-HARVEST_BELT_TIMEOUT = 60  # seconds
-
-# Automation
-AUTO_IRRIGATION_ENABLED = True
-AUTO_LIGHTING_ENABLED = True
-EMERGENCY_STOP_ON_WATER_LOW = True
+# GPIO Pin Configuration
+# ALL pin definitions come from Firestore: devices/{hardware_serial}/gpioState
+# NO hardcoded pins — the webapp is the single source of truth.
+#
+# Active-LOW per pin: stored in Firestore gpioState.{pin}.active_low (boolean).
+# The Pi reads this field on boot to know relay polarity.
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

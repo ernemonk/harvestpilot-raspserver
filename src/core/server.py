@@ -14,6 +14,7 @@ from .. import config
 
 # Import GPIO Actuator Controller for real-time Firestore control
 from ..services.gpio_actuator_controller import GPIOActuatorController
+from ..services.log_server import start_log_server, stop_log_server
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,9 @@ class RaspServer:
             # Start listening for configuration changes
             self.config_manager.listen_for_changes()
             
+            # Start log server (HTTP endpoint for remote log viewing)
+            start_log_server()
+            
             # Connect GPIO Actuator Controller (real-time Firestore listener)
             self.gpio_actuator.connect()
             logger.info("GPIO Actuator Controller connected - listening to Firestore for GPIO commands")
@@ -158,6 +162,9 @@ class RaspServer:
             
             # Close database
             self.database.close()
+            
+            # Stop log server
+            stop_log_server()
             
             # Cleanup GPIO
             cleanup_gpio()

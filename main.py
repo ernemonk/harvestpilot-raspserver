@@ -20,6 +20,11 @@ from src import config
 setup_logging()
 logger = logging.getLogger(__name__)
 
+# Start capturing logs into the ring buffer immediately
+# (so init-phase logs are captured before the HTTP server starts)
+from src.services.log_server import get_log_buffer
+get_log_buffer()
+
 
 def initialize_device():
     """Initialize Pi and register to Firestore (runs once on startup)"""

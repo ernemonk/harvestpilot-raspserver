@@ -166,21 +166,37 @@ class GPIOActuatorController:
     # ──────────────────────────────────────────────────────────────────
     
     def _initialize_hardware_pins(self):
-        """Setup all GPIO pins on the physical hardware"""
+        """Setup all GPIO pins on the physical hardware.
+        
+        SAFETY: Active-LOW relay pins are initialized to HIGH (relay OFF).
+        All other pins are initialized to LOW (device OFF).
+        """
         all_pins = self._get_all_pin_definitions()
+        active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
         
         logger.info(f"🔧 Initializing {len(all_pins)} GPIO pins on hardware...")
+        if active_low:
+            logger.info(f"   Active-LOW relay pins: {sorted(active_low)}")
         
         for pin, name in sorted(all_pins.items()):
             try:
+                is_active_low = pin in active_low
+                
                 if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
-                    GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+                    if is_active_low:
+                        # Active-LOW: initialize HIGH = relay OFF = device OFF
+                        GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
+                    else:
+                        # Active-HIGH: initialize LOW = device OFF
+                        GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
                 
                 self._pins_initialized[pin] = 'output'
-                self._desired_states[pin] = False
-                self._hardware_states[pin] = False
+                self._desired_states[pin] = False  # All pins start as "desired OFF"
+                self._hardware_states[pin] = False  # All pins start as "device OFF"
                 self._pin_names[pin] = name
-                logger.debug(f"  ✓ GPIO{pin}: {name} → OUTPUT, LOW")
+                
+                init_level = "HIGH (active-LOW relay)" if is_active_low else "LOW"
+                logger.debug(f"  ✓ GPIO{pin}: {name} → OUTPUT, {init_level}")
             except Exception as e:
                 logger.warning(f"  ⚠️  GPIO{pin} ({name}) setup failed: {e}")
         
@@ -202,14 +218,17 @@ class GPIOActuatorController:
         return pins
     
     def _sync_initial_state_to_firestore(self):
-        """NON-DESTRUCTIVE boot sync: report hardware state, load webapp state.
+        """SAFE boot sync: ALL pins start OFF. Report hardware state.
         
-        EXISTING pins: ONLY update hardwareState + lastHardwareRead + mismatch.
-                        All other fields (name, state, enabled, schedules, etc.)
-                        are WEBAPP-OWNED and NEVER touched.
+        SAFETY CRITICAL: After every boot, ALL pins are OFF. Stale Firestore
+        `state = True` values from previous sessions are CLEARED.
+        The user MUST manually turn devices back on from the webapp.
         
-        NEW pins (not in Firestore yet): Create with sensible defaults so the
-                        webapp can discover them.
+        This prevents the AUTO-FIX loop from re-activating devices that were
+        left ON before a reboot/crash/power cycle.
+        
+        EXISTING pins: Reset state=False, update hardwareState, preserve names/config.
+        NEW pins: Create with sensible defaults.
         """
         try:
             device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
@@ -223,6 +242,7 @@ class GPIOActuatorController:
             updates = {}
             pins_existing = 0
             pins_created = 0
+            pins_cleared = 0
             
             for pin, legacy_name in self._pin_names.items():
                 pin_str = str(pin)
@@ -234,17 +254,25 @@ class GPIOActuatorController:
                     hw_state = False
                 
                 if existing_pin:
-                    # ── EXISTING PIN: only update Pi-owned hardware fields ──
+                    # ── EXISTING PIN: update hardware fields ──
                     updates[f'gpioState.{pin}.hardwareState'] = hw_state
                     updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
                     
-                    # Load webapp's desired state into memory
-                    webapp_state = existing_pin.get('state', False)
-                    self._desired_states[pin] = webapp_state
-                    self._last_firestore_state[pin] = webapp_state
+                    # SAFETY: Always boot with desired = OFF
+                    # Do NOT load stale Firestore `state` into _desired_states.
+                    # This prevents AUTO-FIX from re-enabling devices after reboot.
+                    self._desired_states[pin] = False
+                    self._last_firestore_state[pin] = False
                     
-                    # Compute mismatch against webapp desired state
-                    updates[f'gpioState.{pin}.mismatch'] = webapp_state != hw_state
+                    # Clear stale `state = True` in Firestore so webapp matches reality
+                    old_state = existing_pin.get('state', False)
+                    if old_state:
+                        updates[f'gpioState.{pin}.state'] = False
+                        pins_cleared += 1
+                        logger.warning(f"🛑 SAFETY: GPIO{pin} had stale state=True — cleared to False")
+                    
+                    # No mismatch: desired=False, hardware=False (just initialized)
+                    updates[f'gpioState.{pin}.mismatch'] = False
                     
                     pins_existing += 1
                 else:
@@ -279,9 +307,13 @@ class GPIOActuatorController:
             
             device_ref.update(updates)
             
-            logger.info(f"✅ Boot sync: {len(self._pin_names)} pins")
-            logger.info(f"   ├─ Existing (hardware state only): {pins_existing}")
-            logger.info(f"   └─ Created (new pins with defaults): {pins_created}")
+            logger.info(f"✅ SAFE Boot sync: {len(self._pin_names)} pins — ALL OFF")
+            logger.info(f"   ├─ Existing: {pins_existing}")
+            logger.info(f"   ├─ Created:  {pins_created}")
+            if pins_cleared:
+                logger.warning(f"   └─ 🛑 CLEARED stale state=True: {pins_cleared} pins (safety)")
+            else:
+                logger.info(f"   └─ No stale states to clear")
             
         except Exception as e:
             logger.error(f"Failed to sync initial state: {e}")
@@ -694,6 +726,12 @@ class GPIOActuatorController:
         
         logger.info(f"⚡ COMMAND {command_id}: type={cmd_type}, pin={pin}, action={action}")
         
+        # ── EMERGENCY STOP ──
+        if cmd_type == 'emergency_stop':
+            logger.critical("🚨🚨🚨 EMERGENCY STOP COMMAND RECEIVED 🚨🚨🚨")
+            self.emergency_stop()
+            return
+        
         if cmd_type == 'pin_control' and pin and action in ('on', 'off'):
             state = action == 'on'
             
@@ -753,6 +791,14 @@ class GPIOActuatorController:
         """Set a GPIO pin HIGH or LOW on the PHYSICAL hardware.
         Then immediately read it back to verify.
         
+        For active-LOW relay pins: the GPIO level is INVERTED.
+          state=True  → GPIO LOW  → relay ON  → device ON
+          state=False → GPIO HIGH → relay OFF → device OFF
+        
+        For active-HIGH pins (MOSFETs, LEDs, etc.): normal mapping.
+          state=True  → GPIO HIGH → device ON
+          state=False → GPIO LOW  → device OFF
+        
         CRITICAL: This method does NOT modify _desired_states or _last_firestore_state.
         Those are ONLY set by the state listener (reflecting Firestore's `state` field).
         This prevents schedules from corrupting the change detection.
@@ -764,9 +810,18 @@ class GPIOActuatorController:
         if bcm_pin not in self._pins_initialized:
             self._setup_pin(bcm_pin, 'output')
         
+        active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+        is_active_low = bcm_pin in active_low
+        
+        # Compute actual GPIO level (invert for active-LOW)
+        if is_active_low:
+            gpio_level = GPIO.LOW if state else GPIO.HIGH
+        else:
+            gpio_level = GPIO.HIGH if state else GPIO.LOW
+        
         # SET the pin
         if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
-            GPIO.output(bcm_pin, GPIO.HIGH if state else GPIO.LOW)
+            GPIO.output(bcm_pin, gpio_level)
         else:
             self._simulated_output[bcm_pin] = state
         
@@ -779,9 +834,10 @@ class GPIOActuatorController:
         mismatch = (state != hw_state) if hw_state is not None else False
         
         if mismatch:
-            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: set={state} but hardware={hw_state}!")
+            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: set={state} but hardware={hw_state}! (active_low={is_active_low})")
         else:
-            logger.info(f"✓ GPIO{bcm_pin} → {state} (hardware confirmed: {hw_state})")
+            level_str = "LOW→ON" if is_active_low and state else "HIGH→OFF" if is_active_low else str(state)
+            logger.info(f"✓ GPIO{bcm_pin} → {state} (hw confirmed: {hw_state}, active_low={is_active_low})")
         
         # Fire callbacks
         if bcm_pin in self._state_callbacks:
@@ -793,8 +849,13 @@ class GPIOActuatorController:
     def _read_hardware_pin(self, bcm_pin: int) -> Optional[bool]:
         """Read the ACTUAL state of a GPIO pin from hardware.
         
-        For output pins, we temporarily switch to input to read,
-        then switch back to output. This gives the REAL value.
+        For active-LOW relay pins, the reading is INVERTED:
+          GPIO LOW  → relay ON  → returns True  (device is ON)
+          GPIO HIGH → relay OFF → returns False (device is OFF)
+        
+        For active-HIGH pins: normal mapping.
+          GPIO HIGH → returns True  (device is ON)
+          GPIO LOW  → returns False (device is OFF)
         """
         try:
             if not GPIO_AVAILABLE or config.SIMULATE_HARDWARE:
@@ -804,18 +865,31 @@ class GPIOActuatorController:
             # For output pins: read the actual level
             # GPIO.input() works on output pins too on RPi - returns current output level
             val = GPIO.input(bcm_pin)
-            return val == GPIO.HIGH
+            
+            active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+            if bcm_pin in active_low:
+                # Active-LOW: GPIO LOW = relay ON = True
+                return val == GPIO.LOW
+            else:
+                return val == GPIO.HIGH
             
         except Exception as e:
             logger.error(f"Failed to read GPIO{bcm_pin} hardware state: {e}")
             return None
     
     def _setup_pin(self, bcm_pin: int, mode: str):
-        """Setup a GPIO pin"""
+        """Setup a GPIO pin (respects active-LOW configuration)"""
         try:
+
+
+            active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+            
             if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
                 if mode == 'output':
-                    GPIO.setup(bcm_pin, GPIO.OUT, initial=GPIO.LOW)
+                    if bcm_pin in active_low:
+                        GPIO.setup(bcm_pin, GPIO.OUT, initial=GPIO.HIGH)  # Relay OFF
+                    else:
+                        GPIO.setup(bcm_pin, GPIO.OUT, initial=GPIO.LOW)
                 elif mode == 'input':
                     GPIO.setup(bcm_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
             
@@ -882,6 +956,13 @@ class GPIOActuatorController:
                             if not self._is_schedule_running_on_pin(pin):
                                 logger.warning(f"🔧 AUTO-FIX GPIO{pin}: desired={desired} but hardware={actual}, re-applying")
                                 self._apply_to_hardware(pin, desired)
+                                # IMMEDIATELY write to Firestore so webapp is never out of sync
+                                hw_after = self._hardware_states.get(pin, desired)
+                                self._async_firestore_write({
+                                    f'gpioState.{pin}.hardwareState': hw_after,
+                                    f'gpioState.{pin}.mismatch': desired != hw_after,
+                                    f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+                                })
                             else:
                                 logger.debug(f"⏳ GPIO{pin}: mismatch (desired={desired}, hw={actual}) expected — schedule active")
                     else:
@@ -942,6 +1023,62 @@ class GPIOActuatorController:
     # ──────────────────────────────────────────────────────────────────
     # PUBLIC API
     # ──────────────────────────────────────────────────────────────────
+    
+    def emergency_stop(self):
+        """🚨 EMERGENCY STOP: Turn ALL pins OFF immediately.
+        
+        SAFETY CRITICAL: This is the nuclear option. Every single GPIO pin
+        is forced LOW, all schedules are cancelled, all desired states are
+        set to False, and Firestore is updated immediately.
+        
+        Can be triggered by:
+          - Firestore command: {type: 'emergency_stop'}
+          - Direct API call: controller.emergency_stop()
+        """
+        logger.critical("🚨 EMERGENCY STOP — forcing ALL pins OFF")
+        
+        active_low = getattr(config, 'ACTIVE_LOW_PINS', set())
+        updates = {}
+        
+        for pin in list(self._pins_initialized.keys()):
+            try:
+                # Force hardware OFF (respecting active-LOW polarity)
+                if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
+                    if pin in active_low:
+                        GPIO.output(pin, GPIO.HIGH)  # Active-LOW: HIGH = relay OFF
+                    else:
+                        GPIO.output(pin, GPIO.LOW)    # Active-HIGH: LOW = device OFF
+                else:
+                    self._simulated_output[pin] = False
+                
+                # Force all tracking to OFF
+                self._desired_states[pin] = False
+                self._hardware_states[pin] = False
+                self._last_firestore_state[pin] = False
+                
+                # Prepare Firestore batch
+                updates[f'gpioState.{pin}.state'] = False
+                updates[f'gpioState.{pin}.hardwareState'] = False
+                updates[f'gpioState.{pin}.mismatch'] = False
+                updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
+                
+                logger.critical(f"  🚨 GPIO{pin} → OFF")
+            except Exception as e:
+                logger.error(f"  Emergency stop failed for GPIO{pin}: {e}")
+        
+        # Cancel all schedule overrides
+        self._user_override_pins = set(self._pins_initialized.keys())
+        
+        # Write to Firestore IMMEDIATELY (blocking, not async — this is an emergency)
+        try:
+            updates['lastHeartbeat'] = firestore.SERVER_TIMESTAMP
+            updates['status'] = 'online'
+            updates['lastEmergencyStop'] = firestore.SERVER_TIMESTAMP
+            device_ref = self.firestore_db.collection('devices').document(self.hardware_serial)
+            device_ref.update(updates)
+            logger.critical(f"🚨 EMERGENCY STOP COMPLETE — {len(self._pins_initialized)} pins forced OFF, Firestore updated")
+        except Exception as e:
+            logger.error(f"🚨 Emergency stop Firestore write failed: {e}")
     
     def register_callback(self, bcm_pin: int, callback: Callable[[bool], None]):
         """Register a callback for when a pin state changes"""

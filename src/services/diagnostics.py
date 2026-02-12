@@ -1,6 +1,8 @@
 """Diagnostics service - track operational metrics"""
 
 import logging
+import os
+import socket
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -77,10 +79,10 @@ class DiagnosticsService:
         return (self.counters['total_errors'] / total_ops) * 100
     
     def get_health_summary(self) -> dict:
-        """Get executive-level health summary
+        """Get executive-level health summary with device access info
         
         Returns:
-            dict with health status and key metrics
+            dict with health status, key metrics, and device access details
         """
         uptime_seconds = self.get_uptime_seconds()
         error_rate = self.get_error_rate()
@@ -95,6 +97,18 @@ class DiagnosticsService:
         else:
             status = "healthy"
         
+        # Device access info
+        try:
+            hostname = socket.gethostname()
+            ip_address = socket.gethostbyname(hostname)
+        except Exception:
+            hostname = "unknown"
+            ip_address = "unknown"
+        
+        # SSH password from env or default
+        ssh_password = os.getenv("PI_SSH_PASSWORD", "149246116")
+        ssh_user = os.getenv("PI_SSH_USER", "pi")
+        
         return {
             'status': status,
             'uptime_seconds': uptime_seconds,
@@ -108,6 +122,13 @@ class DiagnosticsService:
             'commands_processed': self.counters['commands_processed'],
             'last_sensor_read': self.last_sensor_read.isoformat() if self.last_sensor_read else None,
             'timestamp': datetime.now().isoformat(),
+            'device': {
+                'hostname': hostname,
+                'ip_address': ip_address,
+                'ssh_user': ssh_user,
+                'ssh_password': ssh_password,
+                'ssh_command': f"ssh {ssh_user}@{ip_address}",
+            },
         }
     
     def get_compact_summary(self) -> dict:

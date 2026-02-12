@@ -88,6 +88,12 @@ PUMP_RELAY_PIN = 19
 LED_PWM_PIN = 18  # GPIO 18 (Physical Pin 12) - LED strip MOSFET (PWM brightness)
 LED_RELAY_PIN = 13
 
+# Active-LOW relay pins: These relay modules turn ON when GPIO is LOW.
+# Common with SRD-05VDC-SL-C and similar Chinese relay boards.
+# Set to empty set {} if your relays are active-HIGH (GPIO HIGH = relay ON).
+# Safety: active-LOW pins are initialized to HIGH (relay OFF) on boot.
+ACTIVE_LOW_PINS: set = {19, 13}  # Relay pins (pump relay, LED relay)
+
 # Harvest belt motors (6 trays)
 # FIXED: Removed conflicting pins (17 used by Pump, 18 by LED, 1 is invalid)
 MOTOR_PINS = [

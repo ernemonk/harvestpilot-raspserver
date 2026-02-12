@@ -21,6 +21,7 @@ import json
 import time
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from collections import deque
 from datetime import datetime
 from typing import Optional, Deque
@@ -462,12 +463,17 @@ def _get_local_ip() -> str:
         return '0.0.0.0'
 
 
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTPServer that handles each request in a separate thread."""
+    daemon_threads = True
+
+
 class LogServer:
     """Manages the HTTP log server lifecycle."""
     
     def __init__(self, port: int = LOG_SERVER_PORT):
         self.port = port
-        self._server: Optional[HTTPServer] = None
+        self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
     
     def start(self):
@@ -476,7 +482,7 @@ class LogServer:
         get_log_buffer()
         
         try:
-            self._server = HTTPServer(('0.0.0.0', self.port), LogRequestHandler)
+            self._server = ThreadingHTTPServer(('0.0.0.0', self.port), LogRequestHandler)
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
                 daemon=True,

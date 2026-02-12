@@ -8,8 +8,13 @@
 param(
     [string]$PiHost = "192.168.1.233",
     [string]$PiUser = "pi",
-    [string]$PiPassword = "149246116"
+    [string]$PiPassword = $env:PI_PASSWORD  # Set PI_PASSWORD env var or pass -PiPassword
 )
+
+if (-not $PiPassword) {
+    Write-Host "ERROR: Set the PI_PASSWORD environment variable or pass -PiPassword." -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "SSH Keys Setup for Raspberry Pi" -ForegroundColor Cyan

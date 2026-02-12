@@ -55,6 +55,7 @@ MANIFEST
 logs/
 *.log
 monitoring/*.log
+diagnostics-output.txt
 
 # Database
 *.db

@@ -12,10 +12,15 @@ param(
     [switch]$LogOutput
 )
 
-$RemoteHost = "192.168.1.233"
-$RemoteUser = "monkphx"
-$RemotePassword = "149246116"
-$PlinkPath = "C:\Users\User\plink.exe"
+$RemoteHost = $env:PI_HOST ?? "192.168.1.233"
+$RemoteUser = $env:PI_USER ?? "monkphx"
+$RemotePassword = $env:PI_PASSWORD  # Set PI_PASSWORD env var before running
+$PlinkPath = $env:PLINK_PATH ?? "C:\Users\User\plink.exe"
+
+if (-not $RemotePassword) {
+    Write-Host "ERROR: Set the PI_PASSWORD environment variable first." -ForegroundColor Red
+    exit 1
+}
 
 function Invoke-RemoteCommand {
     param([string]$Command)

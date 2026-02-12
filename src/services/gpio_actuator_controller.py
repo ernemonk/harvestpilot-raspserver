@@ -79,6 +79,7 @@ class GPIOActuatorController:
         self._desired_states: Dict[int, bool] = {}         # What Firestore says the pin should be
         self._hardware_states: Dict[int, bool] = {}        # What the pin ACTUALLY is (read from hardware)
         self._pin_names: Dict[int, str] = {}               # bcmPin -> human name
+        self._active_low_pins: set = set()                 # Pins using active-LOW relay logic
         
         # Firestore state tracking (CRITICAL: separate from _desired_states)
         # _last_firestore_state ONLY tracks what Firestore's `state` field says.
@@ -186,7 +187,7 @@ class GPIOActuatorController:
             
             gpio_state = doc.to_dict().get('gpioState', {})
             if not gpio_state:
-                logger.warning("No gpioState in Firestore — no pins to initialize.")
+                logger.info("No gpioState in Firestore yet — waiting for pins to be added from the webapp.")
                 return
             
             self._active_low_pins = set()
@@ -219,7 +220,7 @@ class GPIOActuatorController:
         All other pins are initialized to LOW (device OFF).
         """
         if not self._pin_names:
-            logger.warning("No pins loaded from Firestore — nothing to initialize.")
+            logger.info("No pins defined yet — add pins from the webapp and they'll be initialized automatically.")
             return
         
         active_low = getattr(self, '_active_low_pins', set())
@@ -250,6 +251,86 @@ class GPIOActuatorController:
                 logger.warning(f"  ⚠️  GPIO{pin} ({name}) setup failed: {e}")
         
         logger.info(f"✓ {len(self._pins_initialized)} pins initialized on hardware")
+    
+    def _hot_initialize_pin(self, pin: int, pin_data: dict):
+        """Dynamically initialize a NEW pin that just appeared in Firestore.
+        
+        Called by the real-time listener when the webapp adds a pin.
+        Sets up GPIO hardware, starts tracking, and writes back hardwareState.
+        """
+        name = pin_data.get('name', f'GPIO{pin}')
+        mode = pin_data.get('mode', 'output')
+        active_low = pin_data.get('active_low', False)
+        desired = pin_data.get('state', False)
+        enabled = pin_data.get('enabled', True)
+        
+        logger.info(f"🔌 HOT-INIT: New pin GPIO{pin} ({name}) added from webapp")
+        
+        # Track active-LOW
+        if not hasattr(self, '_active_low_pins'):
+            self._active_low_pins = set()
+        if active_low:
+            self._active_low_pins.add(pin)
+        else:
+            self._active_low_pins.discard(pin)
+        
+        # Setup GPIO hardware
+        self._setup_pin(pin, mode)
+        
+        # Track the pin
+        self._pin_names[pin] = name
+        self._desired_states[pin] = desired
+        self._last_firestore_state[pin] = desired
+        self._hardware_states[pin] = False  # starts OFF
+        
+        # Apply desired state if enabled and state=True
+        if enabled and desired:
+            self._apply_to_hardware(pin, True)
+            self._hardware_states[pin] = True
+        
+        # Write back hardwareState so webapp gets immediate confirmation
+        hw = self._hardware_states.get(pin, False)
+        self._async_firestore_write({
+            f'gpioState.{pin}.hardwareState': hw,
+            f'gpioState.{pin}.mismatch': desired != hw,
+            f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+        })
+        
+        logger.info(f"   ✓ GPIO{pin} ({name}): initialized, hw={hw}, active_low={active_low}")
+    
+    def _hot_remove_pin(self, pin: int):
+        """Clean up a pin that was removed from Firestore (deleted from webapp).
+        
+        Turns off hardware, removes from all tracking dictionaries.
+        """
+        name = self._pin_names.get(pin, f'GPIO{pin}')
+        logger.info(f"🔌 HOT-REMOVE: GPIO{pin} ({name}) deleted from webapp")
+        
+        # Turn off hardware first (safety)
+        try:
+            self._apply_to_hardware(pin, False)
+        except Exception:
+            pass
+        
+        # Clean GPIO
+        if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
+            try:
+                GPIO.cleanup(pin)
+            except Exception:
+                pass
+        
+        # Remove from all tracking
+        self._pins_initialized.pop(pin, None)
+        self._pin_names.pop(pin, None)
+        self._desired_states.pop(pin, None)
+        self._hardware_states.pop(pin, None)
+        self._last_firestore_state.pop(pin, None)
+        self._simulated_output.pop(pin, None)
+        if hasattr(self, '_active_low_pins'):
+            self._active_low_pins.discard(pin)
+        self._user_override_pins.discard(pin)
+        
+        logger.info(f"   ✓ GPIO{pin} ({name}): cleaned up")
     
     def _sync_initial_state_to_firestore(self):
         """SAFE boot sync: ALL pins start OFF. Report hardware state.
@@ -413,10 +494,37 @@ class GPIOActuatorController:
                                         desired = pin_data.get('state', False)
                                         self._desired_states[pin] = desired
                                         self._last_firestore_state[pin] = desired
+                                        # Hot-initialize any pins not yet set up on hardware
+                                        if pin not in self._pins_initialized:
+                                            self._hot_initialize_pin(pin, pin_data)
                                 except (ValueError, TypeError):
                                     pass
                             logger.info(f"📡 Initial GPIO state loaded from Firestore ({len(gpio_state)} pins)")
                             return
+                        
+                        # ── DYNAMIC PIN DETECTION ──────────────────────
+                        # Detect NEW pins added from the webapp and hot-initialize them
+                        for pin_str, pin_data in gpio_state.items():
+                            try:
+                                pin = int(pin_str)
+                                if not isinstance(pin_data, dict):
+                                    continue
+                                if pin not in self._pins_initialized:
+                                    self._hot_initialize_pin(pin, pin_data)
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # ── DETECT REMOVED PINS ────────────────────────
+                        # If a pin was in our tracking but is gone from Firestore, clean it up
+                        current_pins = set()
+                        for pin_str in gpio_state:
+                            try:
+                                current_pins.add(int(pin_str))
+                            except (ValueError, TypeError):
+                                pass
+                        removed = set(self._pins_initialized.keys()) - current_pins
+                        for pin in removed:
+                            self._hot_remove_pin(pin)
                         
                         # Process state changes — use _last_firestore_state for
                         # change detection so schedules don't corrupt tracking

@@ -3,6 +3,9 @@
 import json
 import logging
 import asyncio
+import platform
+import socket
+import sys
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -91,6 +94,48 @@ class FirebaseService:
         """Mark device as offline"""
         self._update_device_status("offline")
     
+    @staticmethod
+    def _collect_hardware_info() -> dict:
+        """Collect Pi hardware info: model, processor, RAM, GPIO pins, OS, Python.
+        
+        This data is written to Firestore so the webapp knows the Pi's capabilities.
+        """
+        # All 26 usable BCM GPIO pins on a standard Pi 40-pin header
+        ALL_BCM_PINS = list(range(2, 28))  # GPIO2–GPIO27
+        
+        hw_info = {
+            "python_version": platform.python_version(),
+            "os_version": platform.platform(),
+            "hostname": socket.gethostname(),
+            "all_gpio_pins": ALL_BCM_PINS,
+            "total_gpio_pins": len(ALL_BCM_PINS),
+        }
+        
+        # Try to get RPi-specific info
+        try:
+            import RPi.GPIO as GPIO
+            rpi = GPIO.RPI_INFO
+            hw_info.update({
+                "pi_model": rpi.get('TYPE', 'Unknown'),
+                "pi_processor": rpi.get('PROCESSOR', 'Unknown'),
+                "pi_ram": rpi.get('RAM', 'Unknown'),
+                "pi_manufacturer": rpi.get('MANUFACTURER', 'Unknown'),
+                "pi_revision": rpi.get('REVISION', 'Unknown'),
+            })
+        except Exception:
+            hw_info["pi_model"] = "Unknown (RPi.GPIO unavailable)"
+        
+        # Try to get IP address
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            hw_info["ip_address"] = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+        
+        return hw_info
+
     def _update_device_status(self, status):
         """Update device status in Firestore (using hardware_serial as primary key)"""
         try:
@@ -100,6 +145,15 @@ class FirebaseService:
                 "hardware_serial": self.hardware_serial,  # Primary identifier
                 "lastHeartbeat": SERVER_TIMESTAMP,
             }
+            
+            # On boot (going online), include full hardware info
+            if status == "online":
+                hw_info = self._collect_hardware_info()
+                update_data["hardware_info"] = hw_info
+                update_data["hostname"] = hw_info.get("hostname", "")
+                update_data["ip_address"] = hw_info.get("ip_address", "")
+                logger.info(f"Hardware info: {hw_info.get('pi_model', '?')} / {hw_info.get('pi_processor', '?')} / {hw_info.get('pi_ram', '?')}MB / {hw_info.get('total_gpio_pins', '?')} GPIO pins")
+            
             # Use hardware_serial as Firestore document key
             self.firestore_db.collection("devices").document(
                 self.hardware_serial

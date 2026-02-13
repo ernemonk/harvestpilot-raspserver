@@ -807,6 +807,7 @@ class GPIOActuatorController:
                 # ON phase
                 self._apply_to_hardware(pin, True)
                 self._hardware_states[pin] = True
+                self._desired_states[pin] = True  # Track schedule intent
                 # Write hardwareState on first cycle for instant UI feedback
                 if cycle_count == 1:
                     self._async_firestore_write({
@@ -827,6 +828,7 @@ class GPIOActuatorController:
                 
                 # OFF phase
                 self._apply_to_hardware(pin, False)
+                self._desired_states[pin] = False  # Track schedule intent
                 logger.debug(f"   GPIO{pin}: OFF (cycle {cycle_count}, {off_time}s)")
                 
                 # Sleep for off time, checking time window periodically
@@ -839,6 +841,7 @@ class GPIOActuatorController:
             # Ensure pin is OFF when schedule ends
             self._apply_to_hardware(pin, False)
             self._hardware_states[pin] = False
+            self._desired_states[pin] = False  # Schedule done, desired=OFF
             logger.info(f"✓ Schedule '{schedule_name}' on GPIO{pin} completed ({cycle_count} cycles)")
             
             # Update Firestore with last run time + final hardwareState
@@ -1128,8 +1131,11 @@ class GPIOActuatorController:
                             if hw_state is None:
                                 continue
                             desired = self._desired_states.get(pin, False)
+                            # If a schedule is actively controlling this pin, there's no mismatch
+                            is_schedule_controlled = self._is_schedule_running_on_pin(pin)
+                            mismatch = (desired != hw_state) and not is_schedule_controlled
                             updates[f'gpioState.{pin}.hardwareState'] = hw_state
-                            updates[f'gpioState.{pin}.mismatch'] = desired != hw_state
+                            updates[f'gpioState.{pin}.mismatch'] = mismatch
                             updates[f'gpioState.{pin}.lastHardwareRead'] = firestore.SERVER_TIMESTAMP
                         
                         if updates:

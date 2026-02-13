@@ -538,10 +538,22 @@ class GPIOActuatorController:
                                 enabled = pin_data.get('enabled', True)
                                 prev_firestore = self._last_firestore_state.get(pin)
                                 
+                                # ── TRACK active_low CHANGES ──────────────────
+                                new_active_low = pin_data.get('active_low', False)
+                                was_active_low = pin in self._active_low_pins
+                                active_low_changed = (new_active_low != was_active_low)
+                                if active_low_changed:
+                                    if new_active_low:
+                                        self._active_low_pins.add(pin)
+                                    else:
+                                        self._active_low_pins.discard(pin)
+                                    logger.info(f"🔄 GPIO{pin} active_low changed: {was_active_low} → {new_active_low}")
+                                
                                 # Detect REAL Firestore `state` change (webapp action)
                                 state_changed = (firestore_state != prev_firestore)
                                 
-                                if state_changed:
+                                # Re-apply hardware if state changed OR active_low polarity changed
+                                if state_changed or active_low_changed:
                                     self._last_firestore_state[pin] = firestore_state
                                     self._desired_states[pin] = firestore_state
                                     
@@ -549,7 +561,10 @@ class GPIOActuatorController:
                                         logger.warning(f"⚠️  GPIO{pin} state change ignored (enabled=false)")
                                         continue
                                     
-                                    logger.info(f"📡 FIRESTORE → GPIO{pin}: {prev_firestore} → {firestore_state}")
+                                    if state_changed:
+                                        logger.info(f"📡 FIRESTORE → GPIO{pin}: {prev_firestore} → {firestore_state}")
+                                    elif active_low_changed:
+                                        logger.info(f"📡 Re-applying GPIO{pin} state={firestore_state} with new polarity (active_low={new_active_low})")
                                     
                                     # If user turned pin OFF while a schedule is running, cancel the schedule
                                     if not firestore_state and self._is_schedule_running_on_pin(pin):

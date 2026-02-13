@@ -662,6 +662,8 @@ class GPIOActuatorController:
                 schedule_cache=self._schedule_cache,
                 schedule_executor=self._execute_schedule,
             )
+            # Give the listener a reference back to clear user overrides
+            self._schedule_listener._controller = self
             
             self._schedule_listener.start_listening()
             logger.info(f"✓ Real-time schedule listener ACTIVE (monitoring {self.hardware_serial})")
@@ -691,9 +693,11 @@ class GPIOActuatorController:
                         for gpio_num, schedules in all_schedules.items():
                             for sched in schedules:
                                 if sched.is_active and sched.enabled:
-                                    # Don't re-trigger if user overrode this pin
+                                    # Clear stale user overrides — if an active schedule exists,
+                                    # the user wants it to run. Overrides should be temporary.
                                     if gpio_num in self._user_override_pins:
-                                        continue
+                                        self._user_override_pins.discard(gpio_num)
+                                        logger.info(f"✅ Cleared stale user override on GPIO{gpio_num} (active schedule found)")
                                     if not self._schedule_state_tracker.is_running(gpio_num, sched.schedule_id):
                                         logger.info(f"⏰ Re-triggering schedule GPIO{gpio_num}/{sched.schedule_id} (in window but not running)")
                                         # Build schedule_data from cached definition

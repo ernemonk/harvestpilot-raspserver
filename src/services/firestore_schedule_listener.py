@@ -41,6 +41,7 @@ class FirestoreScheduleListener:
         self.hardware_serial = hardware_serial
         self.schedule_cache = schedule_cache
         self.schedule_executor = schedule_executor
+        self._controller = None  # Set by GPIOActuatorController to clear user overrides
         self._listener = None
         self._processed_schedules: set = set()  # Track processed schedule IDs to avoid double-processing
         logger.info("✓ FirestoreScheduleListener initialized")
@@ -172,6 +173,11 @@ class FirestoreScheduleListener:
                             logger.info(f"➕ NEW schedule GPIO{gpio_num}/{schedule_id}")
                             self.schedule_cache.update_schedule(gpio_num, schedule_id, schedule_def)
                             
+                            # Clear user override — user explicitly created a schedule, they want it to run
+                            if hasattr(self, '_controller') and self._controller:
+                                self._controller._user_override_pins.discard(gpio_num)
+                                logger.info(f"✅ Cleared user override on GPIO{gpio_num} (new schedule created)")
+                            
                             # Execute immediately if enabled and in time window
                             if self.schedule_executor:
                                 new_sched = self.schedule_cache.get_schedule(gpio_num, schedule_id)
@@ -195,6 +201,10 @@ class FirestoreScheduleListener:
                                     if updated_sched:
                                         # If enabled status changed or time window changed, potentially re-execute
                                         if 'enabled' in changed or 'start_time' in changed or 'end_time' in changed:
+                                            # Clear override when schedule is re-enabled
+                                            if updated_sched.is_active and hasattr(self, '_controller') and self._controller:
+                                                self._controller._user_override_pins.discard(gpio_num)
+                                                logger.info(f"✅ Cleared user override on GPIO{gpio_num} (schedule re-enabled)")
                                             if updated_sched.is_active:
                                                 logger.info(f"⚡ Re-executing modified schedule GPIO{gpio_num}/{schedule_id}")
                                                 threading.Thread(

@@ -142,44 +142,62 @@ class PiInitializer:
             # Use hardware_serial as primary key, fallback to config_device_id
             doc_id = self.pi_serial if self.pi_serial else self.config_device_id
             
-            # Create device document
-            device_data = {
-                # Identifiers
-                "hardware_serial": self.pi_serial or self.config_device_id,
-                "deviceId": self.config_device_id,
-                "deviceName": self.config_device_id,
-                "mac_address": self.pi_mac,
-                "hostname": self.pi_hostname,
-                "ip_address": self.get_ip_address(),
-                
-                # Status
-                "status": "online",
-                "lastHeartbeat": datetime.now().isoformat(),
-                "registered_at": datetime.now().isoformat(),
-                "initialized_at": datetime.now().isoformat(),
-                
-                # System info
-                "platform": "raspberry_pi",
-                "os": "linux",
-                
-                # Device mapping
-                "mapping": {
+            # Check if device already exists — don't overwrite existing config
+            doc_ref = self.firestore.collection('devices').document(doc_id)
+            existing_doc = doc_ref.get()
+            
+            if existing_doc.exists:
+                # Device already registered — only update identity/status fields
+                # NEVER overwrite gpioState, config, or user-configured data
+                update_data = {
                     "hardware_serial": self.pi_serial or self.config_device_id,
-                    "config_id": self.config_device_id,
-                    "mac": self.pi_mac,
+                    "deviceId": self.config_device_id,
+                    "deviceName": self.config_device_id,
+                    "mac_address": self.pi_mac,
                     "hostname": self.pi_hostname,
-                },
-                
-                # GPIO configuration MUST be configured in web app
-                # This is now the ONLY source of truth for all GPIO pins and sensors
-                # User configures everything (inputs, outputs, sensors) via web app
-                "gpioState": {}
-            }
-            
-            # Write to Firestore using hardware_serial (or fallback to config_device_id)
-            self.firestore.collection('devices').document(doc_id).set(device_data, merge=True)
-            
-            logger.info(f"✅ Registered device in Firestore: devices/{doc_id}")
+                    "ip_address": self.get_ip_address(),
+                    "status": "online",
+                    "lastHeartbeat": datetime.now().isoformat(),
+                    "mapping": {
+                        "hardware_serial": self.pi_serial or self.config_device_id,
+                        "config_id": self.config_device_id,
+                        "mac": self.pi_mac,
+                        "hostname": self.pi_hostname,
+                        "platform": "raspberry_pi",
+                        "os": "linux",
+                    },
+                }
+                doc_ref.set(update_data, merge=True)
+                logger.info(f"✅ Device already registered — updated identity fields: devices/{doc_id}")
+            else:
+                # First-time registration — create full document
+                device_data = {
+                    "hardware_serial": self.pi_serial or self.config_device_id,
+                    "deviceId": self.config_device_id,
+                    "deviceName": self.config_device_id,
+                    "mac_address": self.pi_mac,
+                    "hostname": self.pi_hostname,
+                    "ip_address": self.get_ip_address(),
+                    "status": "online",
+                    "lastHeartbeat": datetime.now().isoformat(),
+                    "registered_at": datetime.now().isoformat(),
+                    "initialized_at": datetime.now().isoformat(),
+                    "platform": "raspberry_pi",
+                    "os": "linux",
+                    "mapping": {
+                        "hardware_serial": self.pi_serial or self.config_device_id,
+                        "config_id": self.config_device_id,
+                        "mac": self.pi_mac,
+                        "hostname": self.pi_hostname,
+                        "platform": "raspberry_pi",
+                        "os": "linux",
+                    },
+                    # Empty gpioState — ONLY on first registration
+                    # Webapp will add pins, Pi will read them dynamically
+                    "gpioState": {}
+                }
+                doc_ref.set(device_data)
+                logger.info(f"✅ First-time registration in Firestore: devices/{doc_id}")
             logger.info(f"   Hardware Serial: {device_data['hardware_serial']}")
             logger.info(f"   Device ID: {self.config_device_id}")
             logger.info("")

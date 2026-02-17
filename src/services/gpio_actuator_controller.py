@@ -743,13 +743,13 @@ class GPIOActuatorController:
                         for gpio_num, schedules in all_schedules.items():
                             for sched in schedules:
                                 if sched.is_active and sched.enabled:
-                                    # Clear stale user overrides — if an active schedule exists,
-                                    # the user wants it to run. Overrides should be temporary.
+                                    # If pin is manually overridden, respect user intent and DON'T re-trigger
                                     if gpio_num in self._user_override_pins:
-                                        self._user_override_pins.discard(gpio_num)
-                                        logger.info(f"✅ Cleared stale user override on GPIO{gpio_num} (active schedule found)")
+                                        logger.debug(f"⏳ GPIO{gpio_num} has active schedule but is user-overridden, skipping re-trigger")
+                                        continue
+                                        
                                     if not self._schedule_state_tracker.is_running(gpio_num, sched.schedule_id):
-                                        logger.info(f"⏰ Re-triggering schedule GPIO{gpio_num}/{sched.schedule_id} (in window but not running)")
+                                        logger.info(f"⏰ Re-triggering schedule GPIO{gpio_num}/{sched.schedule_id}")
                                         # Build schedule_data from cached definition
                                         schedule_data = {
                                             'enabled': sched.enabled,
@@ -758,6 +758,9 @@ class GPIOActuatorController:
                                             'durationSeconds': sched.duration_seconds,
                                             'frequencySeconds': sched.interval_seconds,
                                             'name': sched.description,
+                                            'pwm_duty_start': sched.pwm_duty_start,
+                                            'pwm_duty_end': sched.pwm_duty_end,
+                                            'pwm_fade_duration': sched.pwm_fade_duration,
                                         }
                                         threading.Thread(
                                             target=self._execute_schedule,
@@ -825,6 +828,13 @@ class GPIOActuatorController:
                 logger.info(f"⏭️  Schedule {schedule_name} on GPIO{pin} outside time window ({start_time}-{end_time}), skipping")
                 return
             
+            # If we are here, we are starting the schedule loop.
+            # Usually we only get here if NOT in _user_override_pins (checked by checker).
+            # But let's ensure override is cleared if we explicitly START a schedule.
+            if pin in self._user_override_pins:
+                self._user_override_pins.discard(pin)
+                logger.info(f"🚀 Resume schedule on GPIO{pin} (manual override cleared)")
+            
             with self._schedule_execution_lock:
                 # Don't start if already running
                 if self._schedule_state_tracker.is_running(pin, schedule_id):
@@ -841,13 +851,19 @@ class GPIOActuatorController:
             
             # Repeat ON/OFF cycles within the time window
             while is_in_time_window():
-                # Re-check if schedule is still enabled (could be modified while running)
+                # Re-check if schedule is still enabled/modified while running
                 cached = self._schedule_cache.get_schedule(pin, schedule_id)
-                if cached and not cached.enabled:
-                    logger.info(f"⏸️  Schedule {schedule_name} on GPIO{pin} disabled mid-execution, stopping")
+                if not cached or not cached.enabled:
+                    logger.info(f"⏸️  Schedule {schedule_name} on GPIO{pin} disabled or removed, stopping")
                     break
                 
-                # Check if user manually overrode this pin (toggled OFF from webapp)
+                # Update local loop data from cache (in case user changed PWM/Durations live)
+                # Note: start/end times are checked by is_in_time_window()
+                current_pwm = cached.pwm_duty_start
+                current_duration = cached.duration_seconds
+                current_freq = cached.interval_seconds
+                
+                # Check if user manually overrode this pin (from webapp)
                 if pin in self._user_override_pins:
                     logger.info(f"🛑 Schedule {schedule_name} on GPIO{pin} stopped by user override")
                     break
@@ -855,41 +871,45 @@ class GPIOActuatorController:
                 cycle_count += 1
                 
                 # ON phase
-                # Use schedule-specific PWM if provided, otherwise use global default
-                schedule_pwm = schedule_data.get('pwm_duty_start')
-                if schedule_pwm is not None:
-                    self._set_pwm_duty_cycle(pin, schedule_pwm)
-                else:
-                    self._apply_to_hardware(pin, True)
+                # Always update the duty cycle tracker so _apply_to_hardware uses the right one
+                if current_pwm is not None:
+                    self._pwm_duty_cycles[pin] = float(current_pwm)
                 
-                self._hardware_states[pin] = True
-                self._desired_states[pin] = True  # Track schedule intent
+                self._apply_to_hardware(pin, True)
+                self._desired_states[pin] = True
+                
                 # Write hardwareState on first cycle for instant UI feedback
                 if cycle_count == 1:
                     self._async_firestore_write({
                         f'gpioState.{pin}.hardwareState': True,
                         f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
                     })
-                logger.debug(f"   GPIO{pin}: ON (cycle {cycle_count}, {duration_seconds}s)")
+                logger.debug(f"   GPIO{pin}: ON (cycle {cycle_count}, {current_duration}s @ {current_pwm}%)")
                 
                 # Sleep for duration (ON time), checking time window periodically
-                on_remaining = duration_seconds
+                on_remaining = current_duration
                 while on_remaining > 0 and is_in_time_window():
-                    sleep_chunk = min(on_remaining, 1.0)  # Check every second
+                    # Check for override/disabled mid-sleep
+                    if pin in self._user_override_pins: break
+                    cached_check = self._schedule_cache.get_schedule(pin, schedule_id)
+                    if not cached_check or not cached_check.enabled: break
+                    
+                    sleep_chunk = min(on_remaining, 1.0)
                     time.sleep(sleep_chunk)
                     on_remaining -= sleep_chunk
                 
-                if not is_in_time_window():
+                if not is_in_time_window() or pin in self._user_override_pins:
                     break
                 
                 # OFF phase
                 self._apply_to_hardware(pin, False)
-                self._desired_states[pin] = False  # Track schedule intent
-                logger.debug(f"   GPIO{pin}: OFF (cycle {cycle_count}, {off_time}s)")
+                self._desired_states[pin] = False
+                logger.debug(f"   GPIO{pin}: OFF (cycle {cycle_count}, {current_freq}s)")
                 
-                # Sleep for off time, checking time window periodically
-                off_remaining = off_time
+                # Sleep for off time
+                off_remaining = max(0.5, current_freq)
                 while off_remaining > 0 and is_in_time_window():
+                    if pin in self._user_override_pins: break
                     sleep_chunk = min(off_remaining, 1.0)
                     time.sleep(sleep_chunk)
                     off_remaining -= sleep_chunk
@@ -928,11 +948,16 @@ class GPIOActuatorController:
         """
         # Unpack payload if it exists (standard for useCommands hook)
         payload = data.get('payload', {})
+        if not isinstance(payload, dict):
+            payload = {}
         
         cmd_type = data.get('type')
         
         # Check both top-level and payload for these fields
-        pin = data.get('pin') or payload.get('pin')
+        # Top-level takes priority (raw addDoc), payload is fallback (useCommands hook)
+        pin = data.get('pin')
+        if pin is None:
+            pin = payload.get('pin')
         action = (data.get('action') or payload.get('action') or '').lower()
         duration = data.get('duration') or payload.get('duration')
         
@@ -952,8 +977,8 @@ class GPIOActuatorController:
             self.emergency_stop()
             return
         
-        if not pin:
-            logger.warning(f"Command {command_id} ({cmd_type}) missing 'pin' field")
+        if pin is None:
+            logger.warning(f"Command {command_id} ({cmd_type}) missing 'pin' — data keys: {list(data.keys())}, payload keys: {list(payload.keys())}")
             return
             
         if cmd_type == 'pin_control' and action in ('on', 'off'):
@@ -963,12 +988,10 @@ class GPIOActuatorController:
             self._desired_states[pin] = state
             self._last_firestore_state[pin] = state
             
-            # If user is turning OFF while schedule is running, override it
-            if not state and self._is_schedule_running_on_pin(pin):
+            # ANY manual pin_control command creates an override to stop conflicting schedules
+            if self._is_schedule_running_on_pin(pin):
                 self._user_override_pins.add(pin)
-                logger.info(f"🛑 Command: user override on GPIO{pin}, stopping schedules")
-            if state:
-                self._user_override_pins.discard(pin)
+                logger.info(f"🛑 Manual command: user override on GPIO{pin}, stopping schedules")
             
             # 1. Apply to hardware IMMEDIATELY
             self._apply_to_hardware(pin, state)
@@ -1003,10 +1026,21 @@ class GPIOActuatorController:
             logger.info(f"✓ GPIO{pin} → {action.upper()} (command: {command_id})")
         
         elif cmd_type == 'pwm_control':
-            duty_cycle = data.get('duty_cycle') or payload.get('duty_cycle') or 0
+            # Extract duty_cycle from top-level or payload
+            duty_cycle = data.get('duty_cycle')
+            if duty_cycle is None:
+                duty_cycle = payload.get('duty_cycle')
+            if duty_cycle is None:
+                duty_cycle = 0
+            duty_cycle = float(duty_cycle)
             
             # Update internal duty cycle tracker
             self._pwm_duty_cycles[pin] = duty_cycle
+            
+            # If user is manually adjusting PWM while schedule is running, override it
+            if self._is_schedule_running_on_pin(pin):
+                self._user_override_pins.add(pin)
+                logger.info(f"🛑 Manual PWM: user override on GPIO{pin}, stopping schedules")
             
             # If duty_cycle > 0, we assume intent is to be ON
             # This ensures sync even if current state is OFF

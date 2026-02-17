@@ -202,6 +202,10 @@ class GPIOActuatorController:
                 name = pin_data.get('name', f'GPIO{pin}')
                 self._pin_names[pin] = name
                 
+                # Load PWM duty cycle
+                pwm_duty = pin_data.get('pwmDutyCycle', 0)
+                self._pwm_duty_cycles[pin] = pwm_duty
+                
                 # Active-LOW: read from Firestore per-pin field
                 if pin_data.get('active_low', False):
                     self._active_low_pins.add(pin)
@@ -284,10 +288,18 @@ class GPIOActuatorController:
         self._last_firestore_state[pin] = desired
         self._hardware_states[pin] = False  # starts OFF
         
+        # Track PWM duty cycle
+        pwm_duty = pin_data.get('pwmDutyCycle', 0)
+        self._pwm_duty_cycles[pin] = pwm_duty
+        
         # Apply desired state if enabled and state=True
         if enabled and desired:
             self._apply_to_hardware(pin, True)
             self._hardware_states[pin] = True
+        
+        # Apply PWM if set
+        if pwm_duty > 0:
+            self._set_pwm_duty_cycle(pin, pwm_duty)
         
         # Write back hardwareState so webapp gets immediate confirmation
         hw = self._hardware_states.get(pin, False)
@@ -297,7 +309,7 @@ class GPIOActuatorController:
             f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
         })
         
-        logger.info(f"   ✓ GPIO{pin} ({name}): initialized, hw={hw}, active_low={active_low}")
+        logger.info(f"   ✓ GPIO{pin} ({name}): initialized, hw={hw}, pwm={pwm_duty}%, active_low={active_low}")
     
     def _hot_remove_pin(self, pin: int):
         """Clean up a pin that was removed from Firestore (deleted from webapp).
@@ -390,6 +402,11 @@ class GPIOActuatorController:
                     # No mismatch: desired=False, hardware=False (just initialized)
                     updates[f'gpioState.{pin}.mismatch'] = False
                     
+                    # Initialize PWM duty cycle if not set
+                    if 'pwmDutyCycle' not in existing_pin:
+                        updates[f'gpioState.{pin}.pwmDutyCycle'] = 0
+                        self._pwm_duty_cycles[pin] = 0
+                    
                     pins_existing += 1
                 else:
                     # ── NEW PIN: create with full defaults ──────────────────
@@ -411,6 +428,10 @@ class GPIOActuatorController:
                     updates[f'gpioState.{pin}.mode'] = 'output'
                     updates[f'gpioState.{pin}.state'] = False
                     updates[f'gpioState.{pin}.enabled'] = True
+                    updates[f'gpioState.{pin}.pwmDutyCycle'] = 0
+                    
+                    # Initialize PWM tracking
+                    self._pwm_duty_cycles[pin] = 0
                     
                     if device_type:
                         updates[f'gpioState.{pin}.device_type'] = device_type
@@ -493,11 +514,16 @@ class GPIOActuatorController:
                                     pin = int(pin_str)
                                     if isinstance(pin_data, dict):
                                         desired = pin_data.get('state', False)
+                                        pwm_duty = pin_data.get('pwmDutyCycle', 0)
                                         self._desired_states[pin] = desired
                                         self._last_firestore_state[pin] = desired
+                                        self._pwm_duty_cycles[pin] = pwm_duty
                                         # Hot-initialize any pins not yet set up on hardware
                                         if pin not in self._pins_initialized:
                                             self._hot_initialize_pin(pin, pin_data)
+                                        # Apply PWM if set
+                                        if pwm_duty > 0:
+                                            self._set_pwm_duty_cycle(pin, pwm_duty)
                                 except (ValueError, TypeError):
                                     pass
                             logger.info(f"📡 Initial GPIO state loaded from Firestore ({len(gpio_state)} pins)")
@@ -539,6 +565,11 @@ class GPIOActuatorController:
                                 enabled = pin_data.get('enabled', True)
                                 prev_firestore = self._last_firestore_state.get(pin)
                                 
+                                # ── TRACK PWM DUTY CYCLE CHANGES ──────────────────
+                                pwm_duty_cycle = pin_data.get('pwmDutyCycle')
+                                prev_pwm = self._pwm_duty_cycles.get(pin)
+                                pwm_changed = (pwm_duty_cycle != prev_pwm) and (pwm_duty_cycle is not None)
+                                
                                 # ── TRACK active_low CHANGES ──────────────────
                                 new_active_low = pin_data.get('active_low', False)
                                 was_active_low = pin in self._active_low_pins
@@ -553,19 +584,20 @@ class GPIOActuatorController:
                                 # Detect REAL Firestore `state` change (webapp action)
                                 state_changed = (firestore_state != prev_firestore)
                                 
-                                # Re-apply hardware if state changed OR active_low polarity changed
-                                if state_changed or active_low_changed:
-                                    self._last_firestore_state[pin] = firestore_state
-                                    self._desired_states[pin] = firestore_state
+                                # Re-apply hardware if state changed OR active_low polarity changed OR PWM changed
+                                if state_changed or active_low_changed or pwm_changed:
+                                    if state_changed:
+                                        self._last_firestore_state[pin] = firestore_state
+                                        self._desired_states[pin] = firestore_state
                                     
                                     if not enabled:
-                                        logger.warning(f"⚠️  GPIO{pin} state change ignored (enabled=false)")
+                                        logger.warning(f"⚠️  GPIO{pin} change ignored (enabled=false)")
                                         continue
                                     
                                     if state_changed:
                                         logger.info(f"📡 FIRESTORE → GPIO{pin}: {prev_firestore} → {firestore_state}")
-                                    elif active_low_changed:
-                                        logger.info(f"📡 Re-applying GPIO{pin} state={firestore_state} with new polarity (active_low={new_active_low})")
+                                    elif pwm_changed:
+                                        logger.info(f"📡 PWM → GPIO{pin}: {prev_pwm}% → {pwm_duty_cycle}%")
                                     
                                     # If user turned pin OFF while a schedule is running, cancel the schedule
                                     if not firestore_state and self._is_schedule_running_on_pin(pin):
@@ -577,16 +609,21 @@ class GPIOActuatorController:
                                         self._user_override_pins.discard(pin)
                                     
                                     # APPLY TO HARDWARE IMMEDIATELY
-                                    self._apply_to_hardware(pin, firestore_state)
+                                    if pwm_changed:
+                                        self._set_pwm_duty_cycle(pin, pwm_duty_cycle)
+                                        self._pwm_duty_cycles[pin] = pwm_duty_cycle
+                                    else:
+                                        self._apply_to_hardware(pin, firestore_state)
                                     
                                     # Write hardwareState IMMEDIATELY so webapp sees instant feedback
                                     # (don't wait for the 30s sync loop)
-                                    self._hardware_states[pin] = firestore_state
-                                    self._async_firestore_write({
-                                        f'gpioState.{pin}.hardwareState': firestore_state,
-                                        f'gpioState.{pin}.mismatch': False,
-                                        f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
-                                    })
+                                    if not pwm_changed:  # Only update hardwareState for digital changes
+                                        self._hardware_states[pin] = firestore_state
+                                        self._async_firestore_write({
+                                            f'gpioState.{pin}.hardwareState': firestore_state,
+                                            f'gpioState.{pin}.mismatch': False,
+                                            f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+                                        })
                                 
                             except (ValueError, TypeError) as e:
                                 logger.warning(f"Invalid pin key '{pin_str}': {e}")

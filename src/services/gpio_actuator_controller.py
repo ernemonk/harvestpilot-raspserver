@@ -95,6 +95,10 @@ class GPIOActuatorController:
         self._pwm_objects: Dict[int, GPIO.PWM] = {}        # bcmPin -> PWM object
         self._pwm_duty_cycles: Dict[int, float] = {}       # bcmPin -> current duty cycle (0-100)
         
+        # Simulation storage
+        self._simulated_output: Dict[int, bool] = {}       # For simulation mode tracking
+        self._simulated_pwm: Dict[int, float] = {}         # For simulation mode tracking
+        
         # Schedule management (CRITICAL: real-time listening + cache + execution)
         self._schedule_cache: ScheduleCache = get_schedule_cache()
         self._schedule_state_tracker: ScheduleStateTracker = get_schedule_state_tracker()
@@ -608,22 +612,30 @@ class GPIOActuatorController:
                                     if firestore_state:
                                         self._user_override_pins.discard(pin)
                                     
-                                    # APPLY TO HARDWARE IMMEDIATELY
+                                    # Update internal duty cycle tracker before applying
                                     if pwm_changed:
-                                        self._set_pwm_duty_cycle(pin, pwm_duty_cycle)
                                         self._pwm_duty_cycles[pin] = pwm_duty_cycle
-                                    else:
-                                        self._apply_to_hardware(pin, firestore_state)
                                     
-                                    # Write hardwareState IMMEDIATELY so webapp sees instant feedback
-                                    # (don't wait for the 30s sync loop)
-                                    if not pwm_changed:  # Only update hardwareState for digital changes
-                                        self._hardware_states[pin] = firestore_state
-                                        self._async_firestore_write({
-                                            f'gpioState.{pin}.hardwareState': firestore_state,
-                                            f'gpioState.{pin}.mismatch': False,
-                                            f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
-                                        })
+                                    # APPLY TO HARDWARE IMMEDIATELY
+                                    # _apply_to_hardware now handles both Digital and PWM logic automatically
+                                    self._apply_to_hardware(pin, firestore_state)
+                                    
+                                    # Write back to Firestore for immediate confirmation
+                                    # This includes hardwareState and pwmDutyCycle to confirm persistence
+                                    self._hardware_states[pin] = firestore_state
+                                    
+                                    feedback_updates = {
+                                        f'gpioState.{pin}.hardwareState': firestore_state,
+                                        f'gpioState.{pin}.mismatch': False,
+                                        f'gpioState.{pin}.lastHardwareRead': firestore.SERVER_TIMESTAMP,
+                                    }
+                                    
+                                    # If we just reacted to a pwmDutyCycle change from the webapp,
+                                    # echo it back to confirm (standard for our real-time sync)
+                                    if pwm_changed:
+                                        feedback_updates[f'gpioState.{pin}.pwmDutyCycle'] = pwm_duty_cycle
+                                    
+                                    self._async_firestore_write(feedback_updates)
                                 
                             except (ValueError, TypeError) as e:
                                 logger.warning(f"Invalid pin key '{pin_str}': {e}")
@@ -843,7 +855,13 @@ class GPIOActuatorController:
                 cycle_count += 1
                 
                 # ON phase
-                self._apply_to_hardware(pin, True)
+                # Use schedule-specific PWM if provided, otherwise use global default
+                schedule_pwm = schedule_data.get('pwm_duty_start')
+                if schedule_pwm is not None:
+                    self._set_pwm_duty_cycle(pin, schedule_pwm)
+                else:
+                    self._apply_to_hardware(pin, True)
+                
                 self._hardware_states[pin] = True
                 self._desired_states[pin] = True  # Track schedule intent
                 # Write hardwareState on first cycle for instant UI feedback
@@ -981,19 +999,10 @@ class GPIOActuatorController:
         Then immediately read it back to verify.
         
         For active-LOW relay pins: the GPIO level is INVERTED.
-          state=True  → GPIO LOW  → relay ON  → device ON
-          state=False → GPIO HIGH → relay OFF → device OFF
         
-        For active-HIGH pins (MOSFETs, LEDs, etc.): normal mapping.
-          state=True  → GPIO HIGH → device ON
-          state=False → GPIO LOW  → device OFF
-        
-        CRITICAL: This method does NOT modify _desired_states or _last_firestore_state.
-        Those are ONLY set by the state listener (reflecting Firestore's `state` field).
-        This prevents schedules from corrupting the change detection.
-        
-        NO FIRESTORE WRITE HERE. The sync loop handles all Firestore writes
-        at the configured interval. This method only touches hardware + memory.
+        If PWM is active on this pin, it uses ChangeDutyCycle:
+          state=True  → ChangeDutyCycle(self._pwm_duty_cycles[pin] or 100)
+          state=False → ChangeDutyCycle(0)
         """
         # Setup pin if not initialized
         if bcm_pin not in self._pins_initialized:
@@ -1002,17 +1011,34 @@ class GPIOActuatorController:
         active_low = getattr(self, '_active_low_pins', set())
         is_active_low = bcm_pin in active_low
         
-        # Compute actual GPIO level (invert for active-LOW)
-        if is_active_low:
-            gpio_level = GPIO.LOW if state else GPIO.HIGH
-        else:
-            gpio_level = GPIO.HIGH if state else GPIO.LOW
+        # Check if we should use PWM
+        # We use PWM if:
+        # 1. A PWM object already exists for this pin
+        # 2. OR a non-zero duty cycle is defined for this pin
+        duty_cycle = self._pwm_duty_cycles.get(bcm_pin, 0)
+        use_pwm = (bcm_pin in self._pwm_objects) or (duty_cycle > 0)
         
-        # SET the pin
-        if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
-            GPIO.output(bcm_pin, gpio_level)
+        if use_pwm:
+            # PWM implementation
+            target_duty = duty_cycle if state else 0.0
+            # Ensure it's never 0 if state is ON but duty_cycle is 0 (fallback to 100)
+            if state and target_duty == 0:
+                target_duty = 100.0
+            
+            self._set_pwm_duty_cycle(bcm_pin, target_duty)
         else:
-            self._simulated_output[bcm_pin] = state
+            # Standard Digital implementation
+            # Compute actual GPIO level (invert for active-LOW)
+            if is_active_low:
+                gpio_level = GPIO.LOW if state else GPIO.HIGH
+            else:
+                gpio_level = GPIO.HIGH if state else GPIO.LOW
+            
+            # SET the pin
+            if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
+                GPIO.output(bcm_pin, gpio_level)
+            else:
+                self._simulated_output[bcm_pin] = state
         
         # READ it back immediately to verify (in-memory only)
         hw_state = self._read_hardware_pin(bcm_pin)
@@ -1023,10 +1049,10 @@ class GPIOActuatorController:
         mismatch = (state != hw_state) if hw_state is not None else False
         
         if mismatch:
-            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: set={state} but hardware={hw_state}! (active_low={is_active_low})")
+            logger.error(f"🚨 MISMATCH GPIO{bcm_pin}: set={state} but hardware={hw_state}! (active_low={is_active_low}, pwm={use_pwm})")
         else:
-            level_str = "LOW→ON" if is_active_low and state else "HIGH→OFF" if is_active_low else str(state)
-            logger.info(f"✓ GPIO{bcm_pin} → {state} (hw confirmed: {hw_state}, active_low={is_active_low})")
+            mode_str = "PWM" if use_pwm else "DIGITAL"
+            logger.info(f"✓ GPIO{bcm_pin} ({mode_str}) → {state} (hw confirmed: {hw_state})")
         
         # Fire callbacks
         if bcm_pin in self._state_callbacks:
@@ -1039,10 +1065,9 @@ class GPIOActuatorController:
         """Set PWM duty cycle for a pin (0-100%).
         
         Initializes PWM if not already set up.
-        Duty cycle of 0 stops PWM and sets pin LOW.
         """
         # Clamp duty cycle to valid range
-        duty_cycle = max(0.0, min(100.0, duty_cycle))
+        duty_cycle = float(max(0.0, min(100.0, duty_cycle)))
         
         # Setup pin if not initialized
         if bcm_pin not in self._pins_initialized:
@@ -1052,8 +1077,9 @@ class GPIOActuatorController:
         if bcm_pin not in self._pwm_objects:
             if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
                 try:
-                    self._pwm_objects[bcm_pin] = GPIO.PWM(bcm_pin, 1000)  # 1kHz frequency
-                    self._pwm_objects[bcm_pin].start(0)  # Start with 0% duty cycle
+                    # Use a frequency of 1000Hz (good for LEDs/Motors)
+                    self._pwm_objects[bcm_pin] = GPIO.PWM(bcm_pin, 1000)
+                    self._pwm_objects[bcm_pin].start(0)
                     logger.info(f"✓ PWM initialized on GPIO{bcm_pin}")
                 except Exception as e:
                     logger.error(f"Failed to initialize PWM on GPIO{bcm_pin}: {e}")
@@ -1063,21 +1089,29 @@ class GPIOActuatorController:
                 self._pwm_objects[bcm_pin] = None
         
         # Set duty cycle
-        if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE and self._pwm_objects[bcm_pin]:
-            if duty_cycle == 0:
-                # Stop PWM and set pin LOW
-                self._pwm_objects[bcm_pin].stop()
-                GPIO.output(bcm_pin, GPIO.LOW)
-                logger.info(f"✓ GPIO{bcm_pin} PWM stopped (0% = OFF)")
+        if GPIO_AVAILABLE and not config.SIMULATE_HARDWARE:
+            pwm_obj = self._pwm_objects.get(bcm_pin)
+            if pwm_obj:
+                try:
+                    pwm_obj.ChangeDutyCycle(duty_cycle)
+                    logger.info(f"✓ GPIO{bcm_pin} PWM → {duty_cycle}%")
+                except Exception as e:
+                    logger.error(f"Error changing duty cycle on GPIO{bcm_pin}: {e}")
             else:
-                self._pwm_objects[bcm_pin].ChangeDutyCycle(duty_cycle)
-                logger.info(f"✓ GPIO{bcm_pin} PWM → {duty_cycle}%")
+                # Try re-initializing if object lost
+                logger.warning(f"PWM object for GPIO{bcm_pin} missing, re-initializing...")
+                self._pwm_objects.pop(bcm_pin, None)
+                self._set_pwm_duty_cycle(bcm_pin, duty_cycle)
         else:
             # Simulation
             logger.info(f"[SIMULATION] GPIO{bcm_pin} PWM → {duty_cycle}%")
+            self._simulated_pwm[bcm_pin] = duty_cycle
         
-        # Track current duty cycle
-        self._pwm_duty_cycles[bcm_pin] = duty_cycle
+        # Track current duty cycle (unless it was a temporary override like state=False)
+        # Only persist to the internal tracker if it's the "actual" setting
+        # Actually, let's keep _pwm_duty_cycles as the "target" duty cycle when ON.
+        # But for now, just track it.
+        # self._pwm_duty_cycles[bcm_pin] = duty_cycle
     
     def _read_hardware_pin(self, bcm_pin: int) -> Optional[bool]:
         """Read the ACTUAL state of a GPIO pin from hardware.

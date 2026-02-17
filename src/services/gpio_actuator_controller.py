@@ -923,12 +923,27 @@ class GPIOActuatorController:
                 self._schedule_state_tracker.mark_stopped(pin, schedule_id)
     
     def _process_command(self, command_id: str, data: Dict[str, Any]):
-        """Process an explicit GPIO command"""
-        cmd_type = data.get('type')
-        pin = data.get('pin')
-        action = data.get('action', '').lower()
-        duration = data.get('duration')
+        """Process an explicit GPIO command.
+        Handles both top-level fields and nested 'payload' structure.
+        """
+        # Unpack payload if it exists (standard for useCommands hook)
+        payload = data.get('payload', {})
         
+        cmd_type = data.get('type')
+        
+        # Check both top-level and payload for these fields
+        pin = data.get('pin') or payload.get('pin')
+        action = (data.get('action') or payload.get('action') or '').lower()
+        duration = data.get('duration') or payload.get('duration')
+        
+        # Ensure pin is an integer
+        try:
+            if pin is not None:
+                pin = int(pin)
+        except (ValueError, TypeError):
+            logger.error(f"Invalid pin in command {command_id}: {pin}")
+            return
+            
         logger.info(f"⚡ COMMAND {command_id}: type={cmd_type}, pin={pin}, action={action}")
         
         # ── EMERGENCY STOP ──
@@ -937,7 +952,11 @@ class GPIOActuatorController:
             self.emergency_stop()
             return
         
-        if cmd_type == 'pin_control' and pin and action in ('on', 'off'):
+        if not pin:
+            logger.warning(f"Command {command_id} ({cmd_type}) missing 'pin' field")
+            return
+            
+        if cmd_type == 'pin_control' and action in ('on', 'off'):
             state = action == 'on'
             
             # Update state tracking (commands are explicit user actions)
@@ -984,8 +1003,27 @@ class GPIOActuatorController:
             logger.info(f"✓ GPIO{pin} → {action.upper()} (command: {command_id})")
         
         elif cmd_type == 'pwm_control':
-            duty_cycle = data.get('duty_cycle', 0)
-            self._set_pwm_duty_cycle(pin, duty_cycle)
+            duty_cycle = data.get('duty_cycle') or payload.get('duty_cycle') or 0
+            
+            # Update internal duty cycle tracker
+            self._pwm_duty_cycles[pin] = duty_cycle
+            
+            # If duty_cycle > 0, we assume intent is to be ON
+            # This ensures sync even if current state is OFF
+            is_on = duty_cycle > 0
+            self._desired_states[pin] = is_on
+            self._last_firestore_state[pin] = is_on
+            
+            self._apply_to_hardware(pin, is_on)
+            
+            # Update Firestore to confirm change and persistence
+            self._async_firestore_write({
+                f'gpioState.{pin}.state': is_on,
+                f'gpioState.{pin}.pwmDutyCycle': duty_cycle,
+                f'gpioState.{pin}.hardwareState': is_on,
+                f'gpioState.{pin}.lastUpdated': firestore.SERVER_TIMESTAMP,
+            })
+            
             logger.info(f"✓ GPIO{pin} PWM → {duty_cycle}% (command: {command_id})")
         else:
             logger.warning(f"Unknown command type: {cmd_type}")
